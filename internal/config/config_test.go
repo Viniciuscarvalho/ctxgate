@@ -53,46 +53,26 @@ metrics:
 	}
 }
 
-func TestLoadRejectsUnknownFields(t *testing.T) {
-	_, err := Load(writeConfig(t, `
-upstreams:
-  - name: filesystem
-    command: npx
-    commmand: typo
-`))
-	if err == nil || !strings.Contains(err.Error(), "commmand") {
-		t.Fatalf("Load() error = %v, want unknown field name", err)
-	}
-}
-
-func TestLoadRequiresExactlyOneUpstream(t *testing.T) {
+func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 	tests := []struct {
-		name string
-		yaml string
+		name     string
+		yaml     string
+		contains string
 	}{
-		{name: "missing", yaml: "version: 1\n"},
-		{name: "multiple", yaml: "upstreams:\n  - name: one\n    command: one\n  - name: two\n    command: two\n"},
+		{name: "invalid YAML", yaml: "upstreams: [\n", contains: "config:"},
+		{name: "no upstream", yaml: "version: 1\n", contains: "config.upstreams: exactly one upstream is required, got 0"},
+		{name: "unknown field", yaml: "upstreams:\n  - name: filesystem\n    command: npx\n    commmand: typo\n", contains: "commmand"},
+		{name: "invalid startup timeout", yaml: "upstreams:\n  - name: filesystem\n    command: npx\n    startup_timeout: 5\n", contains: "config.upstreams[].startup_timeout:"},
+		{name: "empty file", yaml: "", contains: "config: file is empty"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := Load(writeConfig(t, tt.yaml))
-			if err == nil || !strings.Contains(err.Error(), "upstreams") {
-				t.Fatalf("Load() error = %v, want upstreams validation error", err)
+			if err == nil || !strings.Contains(err.Error(), tt.contains) {
+				t.Fatalf("Load() error = %v, want %q", err, tt.contains)
 			}
 		})
-	}
-}
-
-func TestLoadReportsInvalidUpstreamField(t *testing.T) {
-	_, err := Load(writeConfig(t, `
-upstreams:
-  - name: filesystem
-    command: npx
-    startup_timeout: shortly
-`))
-	if err == nil || !strings.Contains(err.Error(), "startup_timeout") {
-		t.Fatalf("Load() error = %v, want startup_timeout field", err)
 	}
 }
 

@@ -17,13 +17,13 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
+	if err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 1 && args[0] == "--version" {
 		_, err := fmt.Fprintf(stdout, "ctxgate %s\n", version())
 		return err
@@ -54,8 +54,21 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	<-ctx.Done()
-	return nil
+	stdinDrained := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, stdin)
+		stdinDrained <- err
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-stdinDrained:
+		if err != nil {
+			return fmt.Errorf("serve: read stdin: %w", err)
+		}
+		return nil
+	}
 }
 
 func version() string {

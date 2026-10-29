@@ -1,8 +1,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -86,6 +89,12 @@ func Load(path string) (Config, error) {
 	decoder := yaml.NewDecoder(file)
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return Config{}, errors.New("config: file is empty")
+		}
+		if strings.Contains(err.Error(), "must be a duration string") {
+			return Config{}, fmt.Errorf("config.upstreams[].startup_timeout: %w", err)
+		}
 		return Config{}, fmt.Errorf("config: %w", err)
 	}
 	if err := cfg.validate(); err != nil {
