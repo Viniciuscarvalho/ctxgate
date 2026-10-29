@@ -72,6 +72,7 @@ Grafo de dependências (resumo): S1-01 → S1-02 → S1-03/S1-04 → S2-01 → S
   - [ ] Given o upstream rodando, When o stdin do agente fecha (EOF), Then o upstream recebe SIGTERM e, se o prazo (`shutdown_grace`) estourar, kill; o `serve` sai com 0 e nenhum processo filho fica órfão (verificado em teste do binário).
   - [ ] Given o ctxgate configurado num agente real (Claude Code ou Cursor), When uso uma ferramenta do upstream, Then funciona igual a conectar direto (evidência: captura/log anexado ao ticket).
   - [ ] Given um valor inválido num campo de upstream (ex.: `startup_timeout: shortly`), When o `serve` valida a config, Then sai com exit 1 e a mensagem cita o caminho completo do campo (`config.upstreams[0].startup_timeout`).
+  - [ ] `go list -deps ./cmd/ctxgate` não lista `modelcontextprotocol/go-sdk` (checagem no CI que falha se listar); o go-sdk aparece só em `_test.go` (condição do Vinicius, 2026-10-29).
 
 ## CTX-S1-03 — Testes de integração com upstream fake
 - **Semana:** S1 | **Estimativa:** 1,25h (sem mudança)
