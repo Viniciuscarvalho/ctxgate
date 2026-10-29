@@ -1,0 +1,42 @@
+# Copy to ctxgate.yaml and configure the single MCP upstream for this process.
+version: 1
+
+upstreams:
+  - name: filesystem
+    command: npx
+    args:
+      - -y
+      - '@modelcontextprotocol/server-filesystem'
+      - /absolute/path/to/serve
+    env:
+      LOG_LEVEL: info
+    # Optional. Defaults to 30s.
+    startup_timeout: 30s
+
+# These S1 settings are accepted now and are used by later pipeline tickets.
+pipeline:
+  enabled: false
+  timeout: 200ms
+  max_in_flight: 16
+  budget_tokens: 6000
+  dedup:
+    enabled: true
+    similarity: 0.90
+  rank:
+    enabled: true
+    k1: 1.2
+    b: 0.75
+
+# Configure a query argument list per tool when ranking is enabled.
+tools:
+  search:
+    query_args: [query]
+
+store:
+  path: ctxgate.db
+  retention_days: 30
+  capture_content: false
+
+# Omit or leave empty to keep metrics disabled.
+metrics:
+  listen: 127.0.0.1:9090

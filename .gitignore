@@ -31,3 +31,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+*.db
+*.db-wal
+*.db-shm
+ctxgate.yaml
+bench/corpus/
