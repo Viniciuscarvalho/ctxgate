@@ -34,5 +34,5 @@ O FitToday-cms é privado, porque vai virar produto vendido. Os replays gravados
 - A config é congelada antes da rodada final, e o hash dela entra no resultado.
 - A chave HMAC fica em `~/.ctxgate/bench-hmac.key`, com modo 0600, e pode ser sobrescrita por `CTXGATE_BENCH_HMAC_KEY`. Se a chave não existir, o harness falha com erro claro em vez de gerar uma sozinho. A geração é explícita (`ctxgate bench keygen`), e esse caminho entra no `.gitignore` por precaução.
 
-## Adendo 3 (2026-10-29): 10 tarefas — pendente de confirmação do Vinicius no grupo
+## Adendo 3 (2026-10-29): 10 tarefas — confirmado pelo Vinicius no grupo às 19h33
 O Vinicius aprovou cortar o corpus privado para 10 tarefas reais (repassado pelo Product). O gate passa a ser 10/10, e o corpus sintético público usa as mesmas 10 formas de tarefa. Com menos tarefas, a redução de tokens é reportada também por tarefa, e não só no agregado, para que uma tarefa sozinha não distorça o resultado.

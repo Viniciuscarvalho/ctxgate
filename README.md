@@ -92,7 +92,7 @@ Em breve (S4): endpoint Prometheus opcional, desligado por padrão.
 
 São duas camadas:
 
-- **Público (reproduzível):** um corpus sintético em `bench/public/` com 20 formas de tarefa e seed fixa. Qualquer pessoa roda `make bench-public` e obtém os mesmos números.
+- **Público (reproduzível):** um corpus sintético em `bench/public/` com 10 formas de tarefa e seed fixa. Qualquer pessoa roda `make bench-public` e obtém os mesmos números.
 - **Privado:** 10 tarefas reais de um projeto privado, rodadas em replay. No repositório ficam só os números agregados e o hash do corpus.
 
 Metas: **≥30% menos tokens**, **10/10 tarefas com a evidência necessária preservada** e **overhead p95 <20ms** em respostas de até 100KB.

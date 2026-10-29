@@ -50,8 +50,8 @@ type Doc struct {
 
 // Chunk é a unidade de dedup, ranking e orçamento (ADR-006).
 type Chunk struct {
-	Block  int     // índice do bloco de texto de origem
-	Seq    int     // posição original global (estável)
+	Block  int // índice do bloco de texto de origem
+	Seq    int // posição original global (estável)
 	Text   string
 	Tokens int     // contado uma vez pelo pipeline, antes dos estágios
 	Score  float64 // preenchido por Rank
@@ -84,22 +84,22 @@ const (
 
 // StageReport e Report alimentam o Observer.
 type StageReport struct {
-	Name    string
-	Dropped int
+	Name          string
+	Dropped       int
 	TokensDropped int
-	Duration time.Duration
+	Duration      time.Duration
 }
 
 type Report struct {
-	Mode          Mode
-	SkipReason    string // ex.: "structured_content", "is_error", "input_required", "no_text"
-	Encoding      string
-	TokensBefore  int
-	TokensAfter   int
-	QuerySource   string
-	Stages        []StageReport
-	PipelineTime  time.Duration // tempo gasto em Run (parte do overhead)
-	Err           string
+	Mode         Mode
+	SkipReason   string // ex.: "structured_content", "is_error", "input_required", "no_text"
+	Encoding     string
+	TokensBefore int
+	TokensAfter  int
+	QuerySource  string
+	Stages       []StageReport
+	PipelineTime time.Duration // tempo gasto em Run (parte do overhead)
+	Err          string
 }
 
 // Record é a linha por chamada (store + metrics). Montado pelo relay.

@@ -27,7 +27,7 @@ Dev solo usando vários agentes em várias máquinas. Primeiro usuário: o próp
 Sync entre máquinas (fase 2, ideia agentsync), embeddings e LLM, UI web, multi-usuário e times, transporte HTTP/SSE.
 
 ## 7. Métricas de sucesso
-- Técnicas: ≥30% menos tokens sem perder a tarefa (benchmark com 20 tarefas reais); overhead p95 <20ms.
+- Técnicas: ≥30% menos tokens sem perder a tarefa (benchmark com 10 tarefas reais, sucesso 10/10 e redução também reportada por tarefa; corte de 20 para 10 aprovado pelo Vinicius em 2026-10-29); overhead p95 <20ms.
 - Portfólio: README com benchmark reproduzível, post no X com números, ≥100 stars em 60 dias.
 - Gate de produto: ≥10 usuários externos ativos ou pedidos de recursos para times.
 

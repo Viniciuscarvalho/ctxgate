@@ -114,3 +114,5 @@ Medição (spike descartável, in-memory, 100 chamadas): espelhar via SDK custa 
 
 ## Registro de aprovações de dependências (2026-10-29)
 Aprovações do Vinicius repassadas pelo ctxgate · Product: `go.yaml.in/yaml/v3`, `modernc.org/sqlite`, `tiktoken-go/tokenizer` v0.10.0, `prometheus/client_golang` v1.25.0 e `modelcontextprotocol/go-sdk`, este só em testes.
+
+- 2026-10-29 19h40 (UTC-3): Vinicius aprovou no grupo o `github.com/modelcontextprotocol/go-sdk` v1.8.0 apenas como dependência de teste, com a condição de não prejudicar o projeto. Ele não pode entrar no binário, e o CI e o QA conferem isso com `go list -deps ./cmd/ctxgate`.
