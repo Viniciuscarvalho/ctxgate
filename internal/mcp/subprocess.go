@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -52,6 +53,9 @@ func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.W
 	go watchStartup(relayCtx, cancel, started, responded, timedOut, startupTimeout)
 
 	relay := Relay{UpstreamIn: upstreamIn, UpstreamOut: upstreamOut}
+	if stderr != nil {
+		relay.Logger = slog.New(slog.NewTextHandler(stderr, nil))
+	}
 	for _, opt := range opts {
 		opt(&relay)
 	}

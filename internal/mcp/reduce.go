@@ -100,6 +100,7 @@ func (r Relay) deliver(o pipeline.Outcome) {
 	select {
 	case r.deliveries <- struct{}{}:
 		go func() {
+			defer r.pending.done()
 			defer func() { <-r.deliveries }()
 			report := o.Report
 			if o.Done != nil {
@@ -108,6 +109,10 @@ func (r Relay) deliver(o pipeline.Outcome) {
 			r.OnReport(report)
 		}()
 	default:
+		// Limite cheio: o OnReport roda na goroutine da resposta e segura a vaga dela.
+		// É um freio intencional que só entra em sobrecarga (há max_in_flight Reports
+		// pendentes); a resposta já foi escrita ao agente, então ninguém espera por isso.
+		defer r.pending.done()
 		report := o.Report
 		report.Exact = false
 		if o.Done != nil {

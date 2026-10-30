@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/Viniciuscarvalho/ctxgate/internal/pipeline"
 )
@@ -24,13 +26,61 @@ type Relay struct {
 	// OnReport, se não for nil, recebe o Report final de cada tools/call depois que a
 	// resposta foi enviada e a contagem exata terminou. Não atrasa o envio ao agente nem
 	// segura a vaga da resposta; com MaxInFlight Reports pendentes, o próximo sai na hora
-	// com Exact=false.
+	// com Exact=false. No encerramento, o Serve espera os pendentes até shutdownGrace (2 s);
+	// o que não terminar é descartado e logado.
 	OnReport func(pipeline.Report)
 	// MaxInFlight limita quantas respostas de tools/call são reduzidas ao mesmo tempo e
 	// quantos Reports esperam a contagem exata (ADR-001 §3). Zero ou negativo usa 16.
 	MaxInFlight int
+	// Logger recebe a linha de descarte do encerramento. Nil usa slog.Default().
+	Logger *slog.Logger
 
-	deliveries chan struct{} // vagas dos Reports pendentes; criado em Serve
+	deliveries chan struct{}   // vagas dos Reports pendentes; criado em Serve
+	pending    *pendingReports // OnReport ainda não terminados; criado em Serve
+}
+
+// pendingReports conta os OnReport que o Serve ainda precisa esperar no encerramento.
+type pendingReports struct {
+	mu   sync.Mutex
+	n    int
+	idle chan struct{} // fecha quando n volta a zero, se alguém espera
+}
+
+func (p *pendingReports) add() {
+	p.mu.Lock()
+	p.n++
+	p.mu.Unlock()
+}
+
+func (p *pendingReports) done() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.n--; p.n == 0 && p.idle != nil {
+		close(p.idle)
+		p.idle = nil
+	}
+}
+
+// wait espera os pendentes por até grace e devolve quantos não terminaram.
+func (p *pendingReports) wait(grace time.Duration) int {
+	p.mu.Lock()
+	if p.n == 0 {
+		p.mu.Unlock()
+		return 0
+	}
+	idle := make(chan struct{})
+	p.idle = idle
+	p.mu.Unlock()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-idle:
+		return 0
+	case <-timer.C:
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.n
+	}
 }
 
 const defaultMaxInFlight = 16
@@ -52,6 +102,8 @@ func (r Relay) Serve(ctx context.Context, agentIn io.Reader, agentOut io.Writer)
 	}
 
 	r.deliveries = make(chan struct{}, r.maxInFlight())
+	r.pending = &pendingReports{}
+	defer r.drainReports() // todo retorno do Serve espera os OnReport, sem passar de shutdownGrace
 	var agentOutMu sync.Mutex
 	var calls toolCalls
 	write := func(line []byte) error {
@@ -91,6 +143,9 @@ func (r Relay) Serve(ctx context.Context, agentIn io.Reader, agentOut io.Writer)
 					default:
 					}
 				}
+				if after != nil {
+					r.pending.add() // antes do Done: o Wait do EOF e o drain já enxergam este Report
+				}
 				inFlight.Done()
 				if after != nil {
 					after() // só passa de max_in_flight Reports pendentes; a vaga não espera a contagem
@@ -126,6 +181,19 @@ func (r Relay) Serve(ctx context.Context, agentIn io.Reader, agentOut io.Writer)
 		return normalizeCopyError(err)
 	case err := <-upstreamDone:
 		return normalizeCopyError(err)
+	}
+}
+
+// drainReports espera os OnReport pendentes por até shutdownGrace, o mesmo prazo fixo do
+// encerramento do upstream. O que não terminar é descartado (a goroutine segue por conta
+// própria) e uma linha de log informa quantos foram.
+func (r Relay) drainReports() {
+	if n := r.pending.wait(shutdownGrace); n > 0 {
+		logger := r.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("relay: pending reports discarded at shutdown", "discarded", n, "grace", shutdownGrace)
 	}
 }
 

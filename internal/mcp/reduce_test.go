@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ type harness struct {
 	agentOut    *bufio.Reader
 	upstreamIn  *bufio.Reader
 	upstreamOut *io.PipeWriter
+	served      <-chan struct{} // fecha quando o Serve volta
 }
 
 func newHarness(t *testing.T, r Relay) *harness {
@@ -34,10 +37,11 @@ func newHarness(t *testing.T, r Relay) *harness {
 	upOutR, upOutW := io.Pipe()
 	r.UpstreamIn, r.UpstreamOut = upInW, upOutR
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
-		done <- r.Serve(ctx, agentInR, agentOutW)
+		_ = r.Serve(ctx, agentInR, agentOutW)
 		_ = agentOutW.Close()
+		close(done)
 	}()
 	t.Cleanup(func() {
 		_ = agentInW.Close()
@@ -50,7 +54,7 @@ func newHarness(t *testing.T, r Relay) *harness {
 		cancel()
 	})
 	// O fake lê tudo o que o relay manda ao upstream para o pipe nunca travar.
-	return &harness{t: t, agentIn: agentInW, agentOut: bufio.NewReaderSize(agentOutR, 1<<20), upstreamIn: bufio.NewReaderSize(upInR, 1<<20), upstreamOut: upOutW}
+	return &harness{t: t, agentIn: agentInW, agentOut: bufio.NewReaderSize(agentOutR, 1<<20), upstreamIn: bufio.NewReaderSize(upInR, 1<<20), upstreamOut: upOutW, served: done}
 }
 
 func readLine(t testing.TB, r *bufio.Reader) string {
@@ -692,3 +696,129 @@ func TestLargeResponseDoesNotDelayTheSmallOnesBehindIt(t *testing.T) {
 }
 
 const twoMiB = 2 << 20
+
+// ---- Serve espera os OnReport pendentes no encerramento ----
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// serveUntilUpstreamEOF manda três tools/call, entrega as três respostas ao agente, fecha o
+// stdout do upstream e devolve quanto o Serve levou para voltar e o que ele logou.
+func serveUntilUpstreamEOF(t *testing.T, onReport func(pipeline.Report)) (time.Duration, string) {
+	t.Helper()
+	logs := &syncBuffer{}
+	red := &fakeReducer{outcome: applied("x")}
+	h := newHarness(t, Relay{Reducer: red, OnReport: onReport, Logger: slog.New(slog.NewTextHandler(logs, nil))})
+	h.sendCalls(1, 2, 3)
+	for id := 1; id <= 3; id++ {
+		h.respond(id, "x")
+	}
+	for range 3 {
+		h.receivedID()
+	}
+	start := time.Now()
+	_ = h.upstreamOut.Close()
+	select {
+	case <-h.served:
+	case <-time.After(6 * time.Second):
+		t.Fatal("Serve did not return: it must not wait more than the 2s grace for OnReport")
+	}
+	return time.Since(start), logs.String()
+}
+
+// Com OnReport lento, o Serve espera no máximo os 2s fixos do encerramento (shutdownGrace),
+// descarta o que não terminou e loga quantos foram descartados.
+func TestServeWaitsAtMost2sForSlowReportsAndLogsTheDiscarded(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var calls atomic.Int32
+	elapsed, logs := serveUntilUpstreamEOF(t, func(pipeline.Report) {
+		if calls.Add(1) > 1 { // o primeiro termina na hora; os outros dois travam
+			<-release
+		}
+	})
+	if elapsed < 1800*time.Millisecond || elapsed > 3*time.Second {
+		t.Fatalf("Serve returned after %v, want about %v", elapsed, shutdownGrace)
+	}
+	if !strings.Contains(logs, "discarded=2") {
+		t.Fatalf("log = %q, want the count of discarded reports (discarded=2)", logs)
+	}
+}
+
+// Sem Report pendente, o Serve volta na hora e não loga descarte.
+func TestServeDoesNotWaitWhenNoReportIsPending(t *testing.T) {
+	elapsed, logs := serveUntilUpstreamEOF(t, func(pipeline.Report) {})
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Serve returned after %v with nothing pending", elapsed)
+	}
+	if strings.Contains(logs, "discarded") {
+		t.Fatalf("log = %q, want no discard line", logs)
+	}
+}
+
+// Um Report que termina dentro do prazo é esperado, não descartado.
+func TestServeWaitsForAReportThatEndsWithinTheGrace(t *testing.T) {
+	var finished atomic.Int32
+	elapsed, logs := serveUntilUpstreamEOF(t, func(pipeline.Report) {
+		time.Sleep(600 * time.Millisecond)
+		finished.Add(1)
+	})
+	if got := finished.Load(); got != 3 {
+		t.Fatalf("%d of 3 slow reports finished before Serve returned (elapsed %v)", got, elapsed)
+	}
+	if strings.Contains(logs, "discarded") {
+		t.Fatalf("log = %q, want no discard line", logs)
+	}
+}
+
+// Com o limite dos Reports cheio, o OnReport roda inline na goroutine da resposta; esse
+// também conta como pendente até terminar, e depois de terminar o Serve não espera por ele.
+func TestServeDoesNotWaitForAnInlineReportThatAlreadyEnded(t *testing.T) {
+	done := make(chan pipeline.Report, 2)
+	reports := make(chan pipeline.Report, 3)
+	logs := &syncBuffer{}
+	h := newHarness(t, Relay{
+		Reducer: pendingCount(done), MaxInFlight: 2, OnReport: func(r pipeline.Report) { reports <- r },
+		Logger: slog.New(slog.NewTextHandler(logs, nil)),
+	})
+	h.sendCalls(1, 2, 3)
+	for id := 1; id <= 3; id++ {
+		h.respond(id, "x")
+	}
+	for range 3 {
+		h.receivedID()
+	}
+	if r := finalReport(t, reports); r.Exact { // a 3ª, inline, fora do limite
+		t.Fatalf("inline report = %+v, want Exact=false", r)
+	}
+	for range 2 {
+		done <- pipeline.Report{Mode: pipeline.ModeApplied}
+	}
+	for range 2 {
+		finalReport(t, reports)
+	}
+	start := time.Now()
+	_ = h.upstreamOut.Close()
+	select {
+	case <-h.served:
+	case <-time.After(6 * time.Second):
+		t.Fatal("Serve did not return")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond || strings.Contains(logs.String(), "discarded") {
+		t.Fatalf("Serve returned after %v with log %q, want no wait and no discard", elapsed, logs.String())
+	}
+}
