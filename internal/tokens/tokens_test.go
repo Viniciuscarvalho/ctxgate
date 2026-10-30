@@ -198,3 +198,97 @@ type countFunc func(string) (int, error)
 
 func (f countFunc) Count(s string) (int, error) { return f(s) }
 func (countFunc) Encoding() string              { return "fake" }
+
+func TestAsyncCountSurvivesCancelAfterSend(t *testing.T) {
+	c := &fakeCounter{delay: 50 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := UnchangedAsync(ctx, c, []string{"a b", "c d e"}, 0)
+	cancel() // o agente cancelou a requisição depois do envio
+	m := <-ch
+	if !m.Exact || m.TokensBefore != 5 || m.TokensAfter != 5 {
+		t.Fatalf("m = %+v, want Exact=true with 5 tokens", m)
+	}
+}
+
+func TestAsyncCountHasItsOwnTimeout(t *testing.T) {
+	old := asyncTimeout
+	asyncTimeout = 30 * time.Millisecond
+	defer func() { asyncTimeout = old }()
+	c := &fakeCounter{delay: 100 * time.Millisecond}
+	texts := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"} // mais textos que workers
+	m := <-UnchangedAsync(context.Background(), c, texts, 0)
+	if m.Exact {
+		t.Fatalf("m = %+v, want Exact=false after the async timeout", m)
+	}
+}
+
+func TestMeasureAsyncCountsKeptTextsAfter(t *testing.T) {
+	c := &fakeCounter{}
+	m := <-MeasureAsync(context.Background(), nil, c, []string{"a b c", "d e", "f"}, []bool{true, false, true}, 7)
+	if !m.Exact || m.TokensBefore != 6 || m.TokensAfter != 4 || m.NonTextBytes != 7 {
+		t.Fatalf("m = %+v, want before=6 after=4 nonText=7", m)
+	}
+}
+
+// O padrão do prazo próprio da contagem em segundo plano é 5s (AC da #13); o teste
+// acima só prova que o prazo existe, usando um valor menor.
+// blockingCounter segura cada Count até release fechar e avisa quando começa.
+type blockingCounter struct {
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int64
+}
+
+func newBlockingCounter() *blockingCounter {
+	return &blockingCounter{started: make(chan struct{}, 8), release: make(chan struct{})}
+}
+
+func (b *blockingCounter) Encoding() string { return "fake" }
+func (b *blockingCounter) Count(string) (int, error) {
+	b.calls.Add(1)
+	b.started <- struct{}{}
+	<-b.release
+	return 1, nil
+}
+
+// Com o limite cheio a contagem exata não roda e não bloqueia: a medição sai com Exact=false.
+func TestMeasureAsyncWithTheLimitFullSkipsTheCountAndIsNotExact(t *testing.T) {
+	slow := newBlockingCounter()
+	lim := NewLimiter(1)
+	first := MeasureAsync(context.Background(), lim, slow, []string{"a"}, nil, 0)
+	<-slow.started // a vaga única está ocupada
+
+	other := &fakeCounter{}
+	select {
+	case m := <-MeasureAsync(context.Background(), lim, other, []string{"a b c"}, nil, 9):
+		if m.Exact || m.TokensBefore != 0 || m.TokensAfter != 0 || m.NonTextBytes != 9 || m.Encoding != "fake" {
+			t.Fatalf("m = %+v, want Exact=false, zero tokens, NonTextBytes=9", m)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("MeasureAsync blocked with the limit full")
+	}
+	if other.calls.Load() != 0 {
+		t.Fatalf("the count ran %d times with the limit full", other.calls.Load())
+	}
+
+	close(slow.release)
+	if m := <-first; !m.Exact {
+		t.Fatalf("first = %+v, want Exact=true", m)
+	}
+}
+
+func TestMeasureAsyncFreesItsSlotWhenTheCountEnds(t *testing.T) {
+	lim := NewLimiter(1)
+	c := &fakeCounter{}
+	for i := range 3 { // cada contagem termina antes da próxima: a vaga única volta
+		if m := <-MeasureAsync(context.Background(), lim, c, []string{"a b"}, nil, 0); !m.Exact {
+			t.Fatalf("call %d: %+v, want Exact=true", i, m)
+		}
+	}
+}
+
+func TestAsyncCountDefaultTimeoutIs5s(t *testing.T) {
+	if asyncTimeout != 5*time.Second {
+		t.Fatalf("asyncTimeout = %v, want 5s", asyncTimeout)
+	}
+}

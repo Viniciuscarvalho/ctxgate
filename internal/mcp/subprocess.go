@@ -4,17 +4,32 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/Viniciuscarvalho/ctxgate/internal/pipeline"
 )
 
 const shutdownGrace = 2 * time.Second
 
+// Option customizes the Relay that Run builds.
+type Option func(*Relay)
+
+// WithReducer plugs a Reducer into the relay (see Relay.Reducer).
+func WithReducer(r Reducer) Option { return func(relay *Relay) { relay.Reducer = r } }
+
+// WithOnReport sets Relay.OnReport.
+func WithOnReport(f func(pipeline.Report)) Option { return func(relay *Relay) { relay.OnReport = f } }
+
+// WithMaxInFlight sets Relay.MaxInFlight (zero uses the default of 16).
+func WithMaxInFlight(n int) Option { return func(relay *Relay) { relay.MaxInFlight = n } }
+
 // Run starts one stdio upstream and relays the agent session to it.
-func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.Writer, command string, args []string, env map[string]string, startupTimeout time.Duration) error {
+func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.Writer, command string, args []string, env map[string]string, startupTimeout time.Duration, opts ...Option) error {
 	cmd := exec.Command(command, args...)
 	cmd.Stderr = stderr
 	cmd.Env = mergeEnv(env)
@@ -43,8 +58,23 @@ func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.W
 	go watchStartup(relayCtx, cancel, started, responded, timedOut, startupTimeout)
 
 	relay := Relay{UpstreamIn: upstreamIn, UpstreamOut: upstreamOut}
+	if stderr != nil {
+		relay.Logger = slog.New(slog.NewTextHandler(stderr, nil))
+	}
+	for _, opt := range opts {
+		opt(&relay)
+	}
+	// O encerramento do upstream começa quando o Serve passa a esperar os OnReport
+	// (Relay.exiting) e roda em paralelo com essa espera, sob o mesmo prazo de shutdownGrace.
+	shutdownDone := make(chan struct{})
+	relay.exiting = func() {
+		go func() {
+			shutdown(cmd.Process.Pid, upstreamIn, waited)
+			close(shutdownDone)
+		}()
+	}
 	serveErr := relay.Serve(relayCtx, &firstReadReader{Reader: cancelOnEOFReader{Reader: agentIn, cancel: cancel}, signal: started}, &firstWriteWriter{Writer: agentOut, signal: responded})
-	shutdown(cmd.Process.Pid, upstreamIn, waited)
+	<-shutdownDone
 	select {
 	case <-timedOut:
 		return fmt.Errorf("upstream %q did not respond within startup_timeout %s", command, startupTimeout)
