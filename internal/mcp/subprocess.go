@@ -13,8 +13,14 @@ import (
 
 const shutdownGrace = 2 * time.Second
 
+// Option customizes the Relay that Run builds.
+type Option func(*Relay)
+
+// WithReducer plugs a Reducer into the relay (see Relay.Reducer).
+func WithReducer(r Reducer) Option { return func(relay *Relay) { relay.Reducer = r } }
+
 // Run starts one stdio upstream and relays the agent session to it.
-func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.Writer, command string, args []string, env map[string]string, startupTimeout time.Duration) error {
+func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.Writer, command string, args []string, env map[string]string, startupTimeout time.Duration, opts ...Option) error {
 	cmd := exec.Command(command, args...)
 	cmd.Stderr = stderr
 	cmd.Env = mergeEnv(env)
@@ -43,6 +49,9 @@ func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.W
 	go watchStartup(relayCtx, cancel, started, responded, timedOut, startupTimeout)
 
 	relay := Relay{UpstreamIn: upstreamIn, UpstreamOut: upstreamOut}
+	for _, opt := range opts {
+		opt(&relay)
+	}
 	serveErr := relay.Serve(relayCtx, &firstReadReader{Reader: cancelOnEOFReader{Reader: agentIn, cancel: cancel}, signal: started}, &firstWriteWriter{Writer: agentOut, signal: responded})
 	shutdown(cmd.Process.Pid, upstreamIn, waited)
 	select {

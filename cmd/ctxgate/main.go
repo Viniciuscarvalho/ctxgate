@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/Viniciuscarvalho/ctxgate/internal/config"
 	"github.com/Viniciuscarvalho/ctxgate/internal/mcp"
+	"github.com/Viniciuscarvalho/ctxgate/internal/pipeline"
+	"github.com/Viniciuscarvalho/ctxgate/internal/tokens"
 )
 
 func main() {
@@ -56,7 +59,34 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return err
 	}
 
-	return mcp.Run(ctx, stdin, stdout, stderr, upstream.Command, upstream.Args, upstream.Env, time.Duration(upstream.StartupTimeout))
+	var opts []mcp.Option
+	if cfg.Pipeline.Enabled {
+		reducer, err := newPipeline(cfg.Pipeline, stderr)
+		if err != nil {
+			return fmt.Errorf("serve: %w", err)
+		}
+		opts = append(opts, mcp.WithReducer(reducer))
+	}
+	return mcp.Run(ctx, stdin, stdout, stderr, upstream.Command, upstream.Args, upstream.Env, time.Duration(upstream.StartupTimeout), opts...)
+}
+
+// newPipeline monta o pipeline do relay a partir da config. Por enquanto só o dedup exato
+// existe; ele roda quando pipeline.dedup.enabled é true (a config ainda não tem defaults).
+func newPipeline(cfg config.Pipeline, stderr io.Writer) (*pipeline.Pipeline, error) {
+	counter, err := tokens.New()
+	if err != nil {
+		return nil, fmt.Errorf("tokenizer: %w", err)
+	}
+	var stages []pipeline.Stage
+	if cfg.Dedup.Enabled {
+		stages = append(stages, pipeline.ExactDedup{})
+	}
+	return pipeline.New(pipeline.Options{
+		Counter: counter,
+		Stages:  stages,
+		Timeout: time.Duration(cfg.Timeout),
+		Logger:  slog.New(slog.NewTextHandler(stderr, nil)),
+	}), nil
 }
 
 func version() string {

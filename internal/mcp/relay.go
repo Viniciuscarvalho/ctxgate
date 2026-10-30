@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"sync"
+
+	"github.com/Viniciuscarvalho/ctxgate/internal/pipeline"
 )
 
 // Relay is deliberately unaware of JSON-RPC structure while the pipeline is
@@ -14,6 +16,13 @@ import (
 type Relay struct {
 	UpstreamIn  io.WriteCloser
 	UpstreamOut io.Reader
+
+	// Reducer, se não for nil, recebe o result de cada tools/call elegível (ver reduce.go).
+	// Nil mantém o passthrough byte a byte.
+	Reducer Reducer
+	// OnReport, se não for nil, recebe o Report final de cada tools/call depois que a
+	// resposta foi enviada e a contagem exata terminou. Não bloqueia o relay.
+	OnReport func(pipeline.Report)
 }
 
 // Serve forwards agent messages and upstream messages until the agent closes
@@ -24,12 +33,21 @@ func (r Relay) Serve(ctx context.Context, agentIn io.Reader, agentOut io.Writer)
 	}
 
 	var agentOutMu sync.Mutex
+	var calls toolCalls
 	upstreamDone := make(chan error, 1)
 	go func() {
 		upstreamDone <- copyLines(r.UpstreamOut, func(line []byte) error {
+			after := func() {}
+			if r.Reducer != nil {
+				var next func()
+				if line, next = r.reduce(ctx, &calls, line); next != nil {
+					after = next
+				}
+			}
 			agentOutMu.Lock()
-			defer agentOutMu.Unlock()
 			_, err := agentOut.Write(line)
+			agentOutMu.Unlock()
+			after()
 			return err
 		})
 	}()
@@ -37,6 +55,9 @@ func (r Relay) Serve(ctx context.Context, agentIn io.Reader, agentOut io.Writer)
 	agentDone := make(chan error, 1)
 	go func() {
 		agentDone <- copyLines(agentIn, func(line []byte) error {
+			if r.Reducer != nil {
+				calls.note(line)
+			}
 			_, err := r.UpstreamIn.Write(line)
 			return err
 		})
