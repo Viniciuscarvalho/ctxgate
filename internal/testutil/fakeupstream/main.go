@@ -1,21 +1,21 @@
+// Command fakeupstream is the stdio MCP upstream used by tests. All behavior
+// lives in internal/testutil/mcpfake.
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
+
+	"github.com/Viniciuscarvalho/ctxgate/internal/testutil/mcpfake"
 )
 
 func main() {
-	if path := os.Getenv("CTXGATE_FAKE_PID_FILE"); path != "" {
-		if err := os.WriteFile(path, []byte(fmt.Sprint(os.Getpid())), 0o600); err != nil {
-			panic(err)
+	ran, err := mcpfake.RunFromEnv(os.Stdin, os.Stdout)
+	if err != nil || !ran {
+		if err == nil {
+			err = fmt.Errorf("fakeupstream: %s is not set", mcpfake.EnvKey)
 		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
 	}
-
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		fmt.Println(scanner.Text())
-	}
-	select {}
 }

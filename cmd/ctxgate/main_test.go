@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Viniciuscarvalho/ctxgate/internal/testutil/mcpfake"
 )
 
 func TestRunVersion(t *testing.T) {
@@ -133,12 +135,13 @@ func TestServeTerminatesUpstreamWhenAgentStdinCloses(t *testing.T) {
 
 	pidPath := filepath.Join(dir, "upstream.pid")
 	configPath := filepath.Join(dir, "ctxgate.yaml")
-	config := "upstreams:\n  - name: fake\n    command: " + fake + "\n    env:\n      CTXGATE_FAKE_PID_FILE: " + pidPath + "\n"
+	config := "upstreams:\n  - name: fake\n    command: " + fake + "\n"
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	command := exec.Command(ctxgate, "serve", "--config", configPath)
+	command.Env = fakeEnv(mcpfake.Config{PIDFile: pidPath, Linger: true})
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -195,4 +198,13 @@ func waitForPID(t *testing.T, path string) int {
 	}
 	t.Fatalf("upstream did not write %s", path)
 	return 0
+}
+
+// fakeEnv is the environment that makes the built fakeupstream behave as cfg.
+func fakeEnv(cfg mcpfake.Config) []string {
+	env := os.Environ()
+	for key, value := range cfg.Env() {
+		env = append(env, key+"="+value)
+	}
+	return env
 }

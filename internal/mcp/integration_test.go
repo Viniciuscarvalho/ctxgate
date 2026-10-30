@@ -21,14 +21,7 @@ import (
 // TestFakeUpstreamProcess is not a test: when re-executed with mcpfake.EnvKey
 // set, the test binary becomes the fake stdio upstream (subprocess variant).
 func TestFakeUpstreamProcess(t *testing.T) {
-	cfg, ok, err := mcpfake.FromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		return
-	}
-	if err := cfg.Serve(os.Stdin, os.Stdout); err != nil {
+	if _, err := mcpfake.RunFromEnv(os.Stdin, os.Stdout); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -180,21 +173,7 @@ func TestPassthroughPromptsGetIsByteIdentical(t *testing.T) {
 	if !strings.Contains(want, `"text":"texto com acentuação ☕`) {
 		t.Fatalf("baseline response is not the prompt: %q", want)
 	}
-	relays := map[string]func(context.Context, io.Reader, io.Writer) error{
-		"memory": func(ctx context.Context, in io.Reader, out io.Writer) error {
-			upInR, upInW := io.Pipe()
-			upOutR, upOutW := io.Pipe()
-			go func() {
-				_ = cfg.Serve(upInR, upOutW)
-				_ = upOutW.Close()
-			}()
-			return mcp.Relay{UpstreamIn: upInW, UpstreamOut: upOutR}.Serve(ctx, in, out)
-		},
-		"subprocess": func(ctx context.Context, in io.Reader, out io.Writer) error {
-			args := []string{"-test.run=^TestFakeUpstreamProcess$", "--"}
-			return mcp.Run(ctx, in, out, io.Discard, os.Args[0], args, cfg.Env(), 10*time.Second)
-		},
-	}
+	relays := map[string]serveFunc{"memory": memoryRelay(cfg), "subprocess": subprocessRelay(cfg, 10*time.Second)}
 	for name, serve := range relays {
 		t.Run(name, func(t *testing.T) {
 			if got := exchange(t, request, serve); got != want {
@@ -205,7 +184,7 @@ func TestPassthroughPromptsGetIsByteIdentical(t *testing.T) {
 }
 
 // exchange writes one raw request line to serve and returns the raw response line.
-func exchange(t *testing.T, request string, serve func(context.Context, io.Reader, io.Writer) error) string {
+func exchange(t *testing.T, request string, serve serveFunc) string {
 	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
@@ -250,28 +229,39 @@ func connectDirect(t *testing.T, cfg mcpfake.Config) *sdk.ClientSession {
 // connectMemory relays between the SDK client and an in-process fake over io.Pipe.
 func connectMemory(t *testing.T, cfg mcpfake.Config) *sdk.ClientSession {
 	t.Helper()
-	upstreamInR, upstreamInW := io.Pipe()
-	upstreamOutR, upstreamOutW := io.Pipe()
-	go func() {
-		_ = cfg.Serve(upstreamInR, upstreamOutW)
-		_ = upstreamOutW.Close()
-	}()
-	return connectRelay(t, func(ctx context.Context, agentIn io.Reader, agentOut io.Writer) error {
+	return connectRelay(t, memoryRelay(cfg))
+}
+
+// serveFunc runs one agent session through a relay to a fake upstream.
+type serveFunc func(ctx context.Context, agentIn io.Reader, agentOut io.Writer) error
+
+func memoryRelay(cfg mcpfake.Config) serveFunc {
+	return func(ctx context.Context, agentIn io.Reader, agentOut io.Writer) error {
+		upstreamInR, upstreamInW := io.Pipe()
+		upstreamOutR, upstreamOutW := io.Pipe()
+		go func() {
+			_ = cfg.Serve(upstreamInR, upstreamOutW)
+			_ = upstreamOutW.Close()
+		}()
 		return mcp.Relay{UpstreamIn: upstreamInW, UpstreamOut: upstreamOutR}.Serve(ctx, agentIn, agentOut)
-	})
+	}
+}
+
+func subprocessRelay(cfg mcpfake.Config, startupTimeout time.Duration) serveFunc {
+	return func(ctx context.Context, agentIn io.Reader, agentOut io.Writer) error {
+		args := []string{"-test.run=^TestFakeUpstreamProcess$", "--"}
+		return mcp.Run(ctx, agentIn, agentOut, io.Discard, os.Args[0], args, cfg.Env(), startupTimeout)
+	}
 }
 
 // connectSubprocess relays to a re-exec of this test binary acting as the fake.
 func connectSubprocess(t *testing.T, cfg mcpfake.Config) *sdk.ClientSession {
 	t.Helper()
-	return connectRelay(t, func(ctx context.Context, agentIn io.Reader, agentOut io.Writer) error {
-		args := []string{"-test.run=^TestFakeUpstreamProcess$", "--"}
-		return mcp.Run(ctx, agentIn, agentOut, io.Discard, os.Args[0], args, cfg.Env(), 10*time.Second)
-	})
+	return connectRelay(t, subprocessRelay(cfg, 10*time.Second))
 }
 
 // connectRelay starts serve between pipes and returns an SDK client on the agent side.
-func connectRelay(t *testing.T, serve func(context.Context, io.Reader, io.Writer) error) *sdk.ClientSession {
+func connectRelay(t *testing.T, serve serveFunc) *sdk.ClientSession {
 	t.Helper()
 	agentInR, agentInW := io.Pipe()
 	agentOutR, agentOutW := io.Pipe()
