@@ -34,10 +34,10 @@ type Relay struct {
 	MaxInFlight int
 	// Logger recebe a linha de descarte do encerramento. Nil usa slog.Default().
 	Logger *slog.Logger
-	// Exiting, se não for nil, é chamado uma vez quando o Serve começa a esperar os
-	// OnReport pendentes. mcp.Run usa o gancho para encerrar o upstream em paralelo com
-	// essa espera, os dois sob o mesmo prazo de shutdownGrace.
-	Exiting func()
+	// exiting, se não for nil, é chamado uma vez quando o Serve começa a esperar os
+	// OnReport pendentes (sempre, até quando ele devolve erro). Não exportado: existe para
+	// mcp.Run encerrar o upstream em paralelo com essa espera e para os testes.
+	exiting func()
 
 	deliveries chan struct{}   // vagas dos Reports pendentes; criado em Serve
 	pending    *pendingReports // OnReport ainda não terminados; criado em Serve
@@ -101,13 +101,12 @@ func (r Relay) maxInFlight() int {
 // Serve forwards agent messages and upstream messages until the agent closes
 // its input, the upstream closes its output, or ctx is cancelled.
 func (r Relay) Serve(ctx context.Context, agentIn io.Reader, agentOut io.Writer) error {
+	r.deliveries = make(chan struct{}, r.maxInFlight())
+	r.pending = &pendingReports{}
+	defer r.drainReports() // todo retorno do Serve, erro inclusive, passa por aqui; espera no máximo shutdownGrace
 	if r.UpstreamIn == nil || r.UpstreamOut == nil {
 		return errors.New("mcp relay: upstream streams are required")
 	}
-
-	r.deliveries = make(chan struct{}, r.maxInFlight())
-	r.pending = &pendingReports{}
-	defer r.drainReports() // todo retorno do Serve espera os OnReport, sem passar de shutdownGrace
 	var agentOutMu sync.Mutex
 	var calls toolCalls
 	write := func(line []byte) error {
@@ -189,7 +188,7 @@ func (r Relay) Serve(ctx context.Context, agentIn io.Reader, agentOut io.Writer)
 }
 
 // drainReports espera os OnReport pendentes por até shutdownGrace. O encerramento do
-// upstream começa no mesmo instante (Exiting) e tem o mesmo prazo, então o processo sai
+// upstream começa no mesmo instante (exiting) e tem o mesmo prazo, então o processo sai
 // em até shutdownGrace, não em 2 prazos seguidos. O que não terminar é descartado (a
 // goroutine segue por conta própria) e uma linha de log informa quantos foram.
 //
@@ -197,8 +196,8 @@ func (r Relay) Serve(ctx context.Context, agentIn io.Reader, agentOut io.Writer)
 // não contam como pendentes: só os OnReport já registrados são esperados. Aceito no MVP,
 // porque nesse ponto o upstream já morreu e não há mais o que esperar dele.
 func (r Relay) drainReports() {
-	if r.Exiting != nil {
-		r.Exiting()
+	if r.exiting != nil {
+		r.exiting()
 	}
 	if n := r.pending.wait(shutdownGrace); n > 0 {
 		logger := r.Logger

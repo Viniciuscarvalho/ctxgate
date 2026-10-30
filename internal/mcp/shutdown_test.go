@@ -53,3 +53,13 @@ func TestShutdownIsOneSharedDeadlineForReportsAndUpstream(t *testing.T) {
 		t.Fatalf("log = %q, want the discarded count", logs.String())
 	}
 }
+
+// Até o Serve que devolve erro de argumentos passa pelo gancho, uma vez: o Run nunca fica
+// esperando um encerramento que ninguém começou.
+func TestServeCallsTheExitingHookOnceEvenOnAnArgumentError(t *testing.T) {
+	calls := 0
+	err := Relay{exiting: func() { calls++ }}.Serve(context.Background(), strings.NewReader(""), io.Discard)
+	if err == nil || calls != 1 {
+		t.Fatalf("err = %v, hook calls = %d, want an error and exactly 1 call", err, calls)
+	}
+}

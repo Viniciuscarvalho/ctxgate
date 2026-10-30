@@ -65,17 +65,15 @@ func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.W
 		opt(&relay)
 	}
 	// O encerramento do upstream começa quando o Serve passa a esperar os OnReport
-	// (Relay.Exiting) e roda em paralelo com essa espera, sob o mesmo prazo de shutdownGrace.
+	// (Relay.exiting) e roda em paralelo com essa espera, sob o mesmo prazo de shutdownGrace.
 	shutdownDone := make(chan struct{})
-	startShutdown := sync.OnceFunc(func() {
+	relay.exiting = func() {
 		go func() {
 			shutdown(cmd.Process.Pid, upstreamIn, waited)
 			close(shutdownDone)
 		}()
-	})
-	relay.Exiting = startShutdown
+	}
 	serveErr := relay.Serve(relayCtx, &firstReadReader{Reader: cancelOnEOFReader{Reader: agentIn, cancel: cancel}, signal: started}, &firstWriteWriter{Writer: agentOut, signal: responded})
-	startShutdown() // Serve pode voltar antes de chamar o gancho (erro de argumentos)
 	<-shutdownDone
 	select {
 	case <-timedOut:
