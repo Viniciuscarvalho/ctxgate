@@ -65,7 +65,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		if err != nil {
 			return fmt.Errorf("serve: %w", err)
 		}
-		opts = append(opts, mcp.WithReducer(reducer))
+		opts = append(opts, mcp.WithReducer(reducer), mcp.WithMaxInFlight(cfg.Pipeline.MaxInFlight))
 	}
 	return mcp.Run(ctx, stdin, stdout, stderr, upstream.Command, upstream.Args, upstream.Env, time.Duration(upstream.StartupTimeout), opts...)
 }

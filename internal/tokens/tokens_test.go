@@ -229,3 +229,11 @@ func TestMeasureAsyncCountsKeptTextsAfter(t *testing.T) {
 		t.Fatalf("m = %+v, want before=6 after=4 nonText=7", m)
 	}
 }
+
+// O padrão do prazo próprio da contagem em segundo plano é 5s (AC da #13); o teste
+// acima só prova que o prazo existe, usando um valor menor.
+func TestAsyncCountDefaultTimeoutIs5s(t *testing.T) {
+	if asyncTimeout != 5*time.Second {
+		t.Fatalf("asyncTimeout = %v, want 5s", asyncTimeout)
+	}
+}

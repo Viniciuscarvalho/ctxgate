@@ -19,6 +19,9 @@ type Option func(*Relay)
 // WithReducer plugs a Reducer into the relay (see Relay.Reducer).
 func WithReducer(r Reducer) Option { return func(relay *Relay) { relay.Reducer = r } }
 
+// WithMaxInFlight sets Relay.MaxInFlight (zero uses the default of 16).
+func WithMaxInFlight(n int) Option { return func(relay *Relay) { relay.MaxInFlight = n } }
+
 // Run starts one stdio upstream and relays the agent session to it.
 func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.Writer, command string, args []string, env map[string]string, startupTimeout time.Duration, opts ...Option) error {
 	cmd := exec.Command(command, args...)

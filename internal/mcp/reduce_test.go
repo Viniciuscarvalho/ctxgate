@@ -251,9 +251,12 @@ func TestResponsesAreMatchedToTheirCallsOutOfOrder(t *testing.T) {
 	}()
 	readLine(t, h.agentOut)
 	readLine(t, h.agentOut)
-	in := red.calls()
-	if len(in) != 2 || in[0].Call.Tool != "dois" || in[0].Texts[0] != "r2" || in[1].Call.Tool != "um" || in[1].Texts[0] != "r1" {
-		t.Fatalf("inputs = %+v", in)
+	got := map[string]string{} // as respostas são reduzidas em paralelo: a ordem não vale
+	for _, in := range red.calls() {
+		got[in.Call.Tool] = in.Texts[0]
+	}
+	if len(got) != 2 || got["dois"] != "r2" || got["um"] != "r1" {
+		t.Fatalf("inputs = %+v", got)
 	}
 }
 
@@ -493,3 +496,163 @@ func BenchmarkRelayWithPipeline(b *testing.B) {
 		})
 	}
 }
+
+// ---- limite de chamadas em voo (max_in_flight, ADR-001 §3) ----
+
+// sendCalls faz o agente mandar um tools/call por id e espera o upstream recebê-los.
+
+func (h *harness) sendCalls(ids ...int) {
+	go func() {
+		for _, id := range ids {
+			req := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"t","arguments":{}}}`, id)
+			_, _ = io.WriteString(h.agentIn, req+"\n")
+		}
+	}()
+	for range ids {
+		readLine(h.t, h.upstreamIn)
+	}
+}
+
+// respond faz o upstream responder ao id; o canal fecha quando o relay leu a linha inteira.
+func (h *harness) respond(id int, text string) <-chan struct{} {
+	line := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":%q}]}}`, id, text)
+	done := make(chan struct{})
+	go func() { _, _ = io.WriteString(h.upstreamOut, line+"\n"); close(done) }()
+	return done
+}
+
+func (h *harness) receivedID() int {
+	h.t.Helper()
+	var resp struct{ ID int }
+	if err := json.Unmarshal([]byte(readLine(h.t, h.agentOut)), &resp); err != nil {
+		h.t.Fatal(err)
+	}
+	return resp.ID
+}
+
+func TestWithMaxInFlightCallsTheNextOneWaits(t *testing.T) {
+	const limit = 16
+	entered := make(chan struct{}, limit+1)
+	release := make(chan struct{})
+	red := &fakeReducer{outcome: func(in pipeline.Input) pipeline.Outcome {
+		entered <- struct{}{}
+		<-release
+		return pipeline.Outcome{Texts: in.Texts, Report: pipeline.Report{Mode: pipeline.ModePassthrough}}
+	}}
+	h := newHarness(t, Relay{Reducer: red}) // MaxInFlight zero: padrão 16
+	ids := make([]int, limit+1)
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	h.sendCalls(ids...)
+	for _, id := range ids {
+		h.respond(id, "x")
+	}
+	for range limit {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the first 16 calls should be in flight")
+		}
+	}
+	select {
+	case <-entered:
+		t.Fatal("the 17th call started while 16 were in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release <- struct{}{} // uma sai (o agente lê a resposta)...
+	h.receivedID()
+	select {
+	case <-entered: // ...e a 17ª entra
+	case <-time.After(5 * time.Second):
+		t.Fatal("the 17th call never started after one finished")
+	}
+	close(release)
+	for range limit {
+		h.receivedID()
+	}
+}
+
+func TestMaxInFlightIsConfigurable(t *testing.T) {
+	entered := make(chan struct{}, 3)
+	release := make(chan struct{})
+	red := &fakeReducer{outcome: func(in pipeline.Input) pipeline.Outcome {
+		entered <- struct{}{}
+		<-release
+		return pipeline.Outcome{Texts: in.Texts, Report: pipeline.Report{Mode: pipeline.ModePassthrough}}
+	}}
+	h := newHarness(t, Relay{Reducer: red, MaxInFlight: 2})
+	h.sendCalls(1, 2, 3)
+	for id := 1; id <= 3; id++ {
+		h.respond(id, "x")
+	}
+	<-entered
+	<-entered
+	select {
+	case <-entered:
+		t.Fatal("a third call started with max_in_flight=2")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	for range 3 {
+		h.receivedID()
+	}
+}
+
+// A vaga só volta depois que o Report final foi entregue: o deliver fica sob o limite.
+func TestDeliverHoldsItsSlotUntilTheReportIsDelivered(t *testing.T) {
+	countDone := make(chan pipeline.Report, 1)
+	entered := make(chan struct{}, 2)
+	red := &fakeReducer{outcome: func(in pipeline.Input) pipeline.Outcome {
+		entered <- struct{}{}
+		return pipeline.Outcome{Texts: in.Texts, Report: pipeline.Report{Mode: pipeline.ModePassthrough}, Done: countDone}
+	}}
+	h := newHarness(t, Relay{Reducer: red, MaxInFlight: 1, OnReport: func(pipeline.Report) {}})
+	h.sendCalls(1, 2)
+	h.respond(1, "x")
+	h.respond(2, "x")
+	<-entered
+	h.receivedID() // a resposta 1 já chegou ao agente; a contagem exata ainda não terminou
+	select {
+	case <-entered:
+		t.Fatal("the second call started while the first report was still pending")
+	case <-time.After(100 * time.Millisecond):
+	}
+	countDone <- pipeline.Report{}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second call never started after the first report was delivered")
+	}
+	h.receivedID()
+	countDone <- pipeline.Report{}
+}
+
+func TestLargeResponseDoesNotDelayTheSmallOnesBehindIt(t *testing.T) {
+	release := make(chan struct{})
+	red := &fakeReducer{outcome: func(in pipeline.Input) pipeline.Outcome {
+		if len(in.Texts[0]) >= twoMiB {
+			<-release // a resposta de 2 MiB demora
+		}
+		return pipeline.Outcome{Texts: in.Texts, Report: pipeline.Report{Mode: pipeline.ModePassthrough}}
+	}}
+	h := newHarness(t, Relay{Reducer: red})
+	h.sendCalls(1, 2, 3, 4)
+	<-h.respond(1, strings.Repeat("a", twoMiB)) // o relay lê a grande antes das pequenas
+	for id := 2; id <= 4; id++ {
+		h.respond(id, "pequena")
+	}
+	got := map[int]bool{}
+	for range 3 { // as pequenas chegam com a grande ainda presa no reducer
+		got[h.receivedID()] = true
+	}
+	if !got[2] || !got[3] || !got[4] {
+		t.Fatalf("small responses received = %v", got)
+	}
+	close(release)
+	if id := h.receivedID(); id != 1 {
+		t.Fatalf("last response id = %d, want 1", id)
+	}
+}
+
+const twoMiB = 2 << 20

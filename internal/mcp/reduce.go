@@ -61,7 +61,8 @@ func (t *toolCalls) idle() bool {
 
 // reduce é o ponto único em que o pipeline entra no relay. Só a resposta de um
 // tools/call passa por aqui; qualquer falha devolve a linha original (fail-open).
-// after, se não for nil, roda depois que a linha foi enviada ao agente.
+// after, se não for nil, roda depois que a linha foi enviada ao agente e bloqueia até o
+// Report final ser entregue; quem chama decide se isso segura uma vaga (ver Relay.Serve).
 func (r Relay) reduce(ctx context.Context, calls *toolCalls, line []byte) (out []byte, after func()) {
 	out = line
 	defer func() {
@@ -69,9 +70,6 @@ func (r Relay) reduce(ctx context.Context, calls *toolCalls, line []byte) (out [
 			out, after = line, nil
 		}
 	}()
-	if calls.idle() {
-		return line, nil
-	}
 	var env map[string]json.RawMessage
 	if json.Unmarshal(line, &env) != nil || len(env["result"]) == 0 || len(env["id"]) == 0 {
 		return line, nil
@@ -84,7 +82,7 @@ func (r Relay) reduce(ctx context.Context, calls *toolCalls, line []byte) (out [
 	view := viewOf(env["result"])
 	outcome := r.Reducer.Run(ctx, pipeline.Input{Call: call, Texts: view.texts, NonTextBytes: view.nonTextBytes, SkipReason: view.skip})
 	if r.OnReport != nil {
-		after = func() { go r.deliver(outcome) }
+		after = func() { r.deliver(outcome) }
 	}
 	if outcome.Report.Mode != pipeline.ModeApplied || len(outcome.Texts) != len(view.texts) {
 		return line, after
