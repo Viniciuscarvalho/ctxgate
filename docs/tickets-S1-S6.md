@@ -88,12 +88,13 @@ Grafo de dependências (resumo): S1-01 → S1-02 → S1-03/S1-04 → S2-01 → S
   - [ ] Cobre: listagem de tools, chamada com sucesso, erro do upstream (chega intacto), resposta ≥1 MB (lida sem `bufio.Scanner`).
   - [ ] 20 chamadas concorrentes passam com `-race`, sem falhas nem respostas trocadas (correlação por id).
   - [ ] Cobertura de `internal/mcp` ≥70% (`go test -cover`).
+  - [ ] A cobertura inclui `prompts/get`.
 
 ## CTX-S1-04 — Ciclo de vida e erros do upstream
 - **Semana:** S1 | **Estimativa:** 0,75h (sem mudança)
 - **Referências:** ADR-001 (§5), `decisoes-cto.md` §1 (padrões) e §2 (S1-04).
 - **Contexto/porquê:** proxy local que vaza processo ou trava quando o upstream cai destrói a confiança do único usuário.
-- **Escopo:** encerramento ao fechar o stdin do agente (`shutdown_grace: 2s`: fecha stdin → SIGTERM → SIGKILL por grupo de processos; no Windows, melhor esforço, declarado); `startup_timeout: 30s` entre o 1º pedido do agente e a 1ª resposta; erro imediato se o `exec` falha; propagação de erro ao agente; sem timeout por chamada (cancelamento é do agente).
+- **Escopo:** encerramento ao fechar o stdin do agente (fecha stdin → SIGTERM → kill após prazo fixo de 2s, não configurável (sem campo no YAML), por grupo de processos; no Windows, melhor esforço, declarado); `startup_timeout: 30s` entre o 1º pedido do agente e a 1ª resposta; erro imediato se o `exec` falha; propagação de erro ao agente; sem timeout por chamada (cancelamento é do agente).
 - **Fora de escopo:** reinício automático/retry do upstream.
 - **Dependências:** CTX-S1-02, CTX-S1-03 (usa o harness).
 - **Critérios de aceite:**
@@ -102,6 +103,9 @@ Grafo de dependências (resumo): S1-01 → S1-02 → S1-03/S1-04 → S2-01 → S
   - [ ] Given comando de upstream inexistente, When `serve` inicia, Then falha de imediato (erro de `exec`) com mensagem legível e exit ≠0.
   - [ ] Given upstream que não responde ao 1º pedido, When passam `startup_timeout` (configurável, teste com valor curto), Then o agente recebe erro e o processo encerra.
   - [ ] Logs só em stderr; stdout carrega só protocolo (teste verifica).
+  - [ ] Um teste do repo cobre o kill após 2s com um upstream que ignora o SIGTERM, sem processo órfão.
+  - [ ] `cmd/fakeupstream` é um `main` fino que só chama `internal/testutil/mcpfake`. O repo não tem uma segunda implementação de fake de upstream: `rg` por handlers MCP fora de `mcpfake` não retorna nada nos fakes (Product + CTO, 2026-10-29).
+  - [ ] A mensagem de erro do `startup_timeout` cita o campo uma única vez.
 
 ---
 

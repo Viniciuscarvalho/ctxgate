@@ -19,7 +19,7 @@ Data: 2026-10-29. ADRs: 001 (estrutura/SDK/pipeline), 002 (consulta BM25), 003 (
 | 12 | Plataformas / CGO | `CGO_ENABLED=0`; linux, darwin (amd64/arm64) e windows/amd64 (+linux/arm64). Cruzamento sem CGO verificado em spike (linux/arm64, darwin/arm64, windows/amd64); CI só em ubuntu; Windows sem smoke test (declarar no README). | ADR-003 |
 | 13 | Marcador de truncamento | **Não no MVP.** Sem ferramenta de expandir é ruído e quebra idempotência. Reavaliar após S5 (`ctxgate_expand`, fase 2). | ADR-006 |
 
-Padrões iniciais (validados no S5, ajustáveis só por config): `budget_tokens: 6000` (respostas que cabem passam intactas), `dedup.similarity: 0.90`, `bm25 k1=1.2 b=0.75`, `pipeline.timeout: 200ms`, `max_in_flight: 16`, `startup_timeout: 30s` (cobre `npx` frio), `shutdown_grace: 2s` (fecha stdin → SIGTERM → SIGKILL por grupo de processos), sem timeout por chamada (cancelamento é do agente).
+Padrões iniciais (validados no S5, ajustáveis só por config): `budget_tokens: 6000` (respostas que cabem passam intactas), `dedup.similarity: 0.90`, `bm25 k1=1.2 b=0.75`, `pipeline.timeout: 200ms`, `max_in_flight: 16`, `startup_timeout: 30s` (cobre `npx` frio), encerramento do upstream com prazo fixo de 2s no código, sem campo no YAML (fecha stdin → SIGTERM → SIGKILL por grupo de processos; ver decisão de 2026-10-29 20h00), sem timeout por chamada (cancelamento é do agente).
 
 ## 2. Ajustes sugeridos nos tickets (sem mudar escopo)
 **S1**
@@ -80,3 +80,5 @@ O repo `Viniciuscarvalho/ctxgate` (público, branch `main`, 1 commit `3cc3278`) 
 ## Aprovações de dependências (Vinicius, 2026-10-29, horário de Brasília, repassadas pelo Product)
 - 19:09: `modelcontextprotocol/go-sdk`, só em testes; `modernc.org/sqlite`.
 - 19:10: `go.yaml.in/yaml/v3`, `tiktoken-go/tokenizer` v0.10.0 e `prometheus/client_golang` v1.25.0.
+
+- 2026-10-29 20h00 (UTC-3): O prazo de encerramento do upstream fica fixo em 2s no código e não entra no YAML como `shutdown_grace`. Só vira configurável se algum upstream real precisar de mais tempo. O encerramento normal é do S1-02, e as falhas do upstream ficam com o S1-04.
