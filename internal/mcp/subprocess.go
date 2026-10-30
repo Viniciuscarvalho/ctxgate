@@ -10,6 +10,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/Viniciuscarvalho/ctxgate/internal/pipeline"
 )
 
 const shutdownGrace = 2 * time.Second
@@ -19,6 +21,9 @@ type Option func(*Relay)
 
 // WithReducer plugs a Reducer into the relay (see Relay.Reducer).
 func WithReducer(r Reducer) Option { return func(relay *Relay) { relay.Reducer = r } }
+
+// WithOnReport sets Relay.OnReport.
+func WithOnReport(f func(pipeline.Report)) Option { return func(relay *Relay) { relay.OnReport = f } }
 
 // WithMaxInFlight sets Relay.MaxInFlight (zero uses the default of 16).
 func WithMaxInFlight(n int) Option { return func(relay *Relay) { relay.MaxInFlight = n } }
@@ -59,8 +64,19 @@ func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.W
 	for _, opt := range opts {
 		opt(&relay)
 	}
+	// O encerramento do upstream começa quando o Serve passa a esperar os OnReport
+	// (Relay.Exiting) e roda em paralelo com essa espera, sob o mesmo prazo de shutdownGrace.
+	shutdownDone := make(chan struct{})
+	startShutdown := sync.OnceFunc(func() {
+		go func() {
+			shutdown(cmd.Process.Pid, upstreamIn, waited)
+			close(shutdownDone)
+		}()
+	})
+	relay.Exiting = startShutdown
 	serveErr := relay.Serve(relayCtx, &firstReadReader{Reader: cancelOnEOFReader{Reader: agentIn, cancel: cancel}, signal: started}, &firstWriteWriter{Writer: agentOut, signal: responded})
-	shutdown(cmd.Process.Pid, upstreamIn, waited)
+	startShutdown() // Serve pode voltar antes de chamar o gancho (erro de argumentos)
+	<-shutdownDone
 	select {
 	case <-timedOut:
 		return fmt.Errorf("upstream %q did not respond within startup_timeout %s", command, startupTimeout)
