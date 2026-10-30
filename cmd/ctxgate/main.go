@@ -10,8 +10,10 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"syscall"
+	"time"
 
 	"github.com/Viniciuscarvalho/ctxgate/internal/config"
+	"github.com/Viniciuscarvalho/ctxgate/internal/mcp"
 )
 
 func main() {
@@ -54,21 +56,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return err
 	}
 
-	stdinDrained := make(chan error, 1)
-	go func() {
-		_, err := io.Copy(io.Discard, stdin)
-		stdinDrained <- err
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil
-	case err := <-stdinDrained:
-		if err != nil {
-			return fmt.Errorf("serve: read stdin: %w", err)
-		}
-		return nil
-	}
+	return mcp.Run(ctx, stdin, stdout, stderr, upstream.Command, upstream.Args, upstream.Env, time.Duration(upstream.StartupTimeout))
 }
 
 func version() string {
