@@ -104,7 +104,7 @@ Grafo de dependências (resumo): S1-01 → S1-02 → S1-03/S1-04 → S2-01 → S
   - [ ] Given upstream que não responde ao 1º pedido, When passam `startup_timeout` (configurável, teste com valor curto), Then o agente recebe erro e o processo encerra.
   - [ ] Logs só em stderr; stdout carrega só protocolo (teste verifica).
   - [ ] Um teste do repo cobre o kill após 2s com um upstream que ignora o SIGTERM, sem processo órfão.
-  - [ ] O `fakeupstream` vira um `main` fino que chama `internal/testutil/mcpfake`, sem segunda implementação de fake (`rg` não acha lógica de protocolo fora do `mcpfake`).
+  - [ ] `cmd/fakeupstream` é um `main` fino que só chama `internal/testutil/mcpfake`. O repo não tem uma segunda implementação de fake de upstream: `rg` por handlers MCP fora de `mcpfake` não retorna nada nos fakes (Product + CTO, 2026-10-29).
   - [ ] A mensagem de erro do `startup_timeout` cita o campo uma única vez.
 
 ---
