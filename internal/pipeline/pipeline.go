@@ -22,6 +22,7 @@ const (
 	exactCountMaxBytes = 256 << 10
 	maxChunkTokens     = 512 // parágrafo acima disso é subdividido por linha (ADR-006)
 	defaultTimeout     = 200 * time.Millisecond
+	defaultMaxInFlight = 16 // ADR-001 §3
 )
 
 // Call descreve a chamada tools/call que originou a resposta.
@@ -100,6 +101,9 @@ type Options struct {
 	Stages  []Stage       // executados em ordem
 	Timeout time.Duration // 0 => 200ms
 	Logger  *slog.Logger  // nil => descarta
+	// MaxInFlight limita as contagens exatas em segundo plano (pipeline.max_in_flight);
+	// 0 => 16. Sem vaga livre a contagem não roda e o Report final sai com Exact=false.
+	MaxInFlight int
 }
 
 // Pipeline é imutável depois de New, então Run é seguro para uso concorrente.
@@ -108,10 +112,15 @@ type Pipeline struct {
 	stages  []Stage
 	timeout time.Duration
 	log     *slog.Logger
+	counts  tokens.Limiter
 }
 
 func New(o Options) *Pipeline {
 	p := &Pipeline{counter: o.Counter, stages: slices.Clone(o.Stages), timeout: o.Timeout, log: o.Logger}
+	p.counts = tokens.NewLimiter(defaultMaxInFlight)
+	if o.MaxInFlight > 0 {
+		p.counts = tokens.NewLimiter(o.MaxInFlight)
+	}
 	if p.timeout <= 0 {
 		p.timeout = defaultTimeout
 	}
@@ -320,7 +329,7 @@ func (p *Pipeline) fallback(parent context.Context, in Input, err error) Outcome
 // entrega o Report final em Done. keep nil mantém todos.
 func (p *Pipeline) measureLater(ctx context.Context, report Report, texts []string, keep []bool) <-chan Report {
 	done := make(chan Report, 1)
-	m := tokens.MeasureAsync(ctx, p.counter, texts, keep, report.NonTextBytes)
+	m := tokens.MeasureAsync(ctx, p.counts, p.counter, texts, keep, report.NonTextBytes)
 	go func() {
 		report.Measurement = <-m
 		done <- report

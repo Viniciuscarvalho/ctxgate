@@ -418,3 +418,44 @@ func TestCounterErrorOnlyMarksNotExact(t *testing.T) {
 		t.Fatalf("counter error not logged: %q", logs.String())
 	}
 }
+
+// Com as vagas das contagens em segundo plano ocupadas, a próxima resposta não espera
+// nem roda a contagem: o Report final sai na hora com Exact=false (fora do M1).
+func TestFullCountLimitMakesTheFinalReportNotExact(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		maxInFlight, limit int
+	}{
+		{"padrão 16", 0, 16},
+		{"configurado", 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := make(chan struct{})
+			c := &slowCounter{Counter: realCounter(t), gate: gate}
+			p := pipeline.New(pipeline.Options{Counter: c, Stages: []pipeline.Stage{pipeline.ExactDedup{}}, Timeout: 10 * time.Second, MaxInFlight: tc.maxInFlight})
+			text := bigText(300 << 10) // >256 KB: a contagem exata fica para depois
+			var pending []pipeline.Outcome
+			for range tc.limit {
+				pending = append(pending, run(t, p, text))
+			}
+			o := run(t, p, text) // não há vaga: a contagem não roda
+			select {
+			case f := <-o.Done:
+				if f.Exact || f.Mode != pipeline.ModeApplied {
+					t.Fatalf("final = %+v, want applied with Exact=false", f)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("the final report waited for a count that could not run")
+			}
+			close(gate)
+			for i, p := range pending {
+				if f := final(t, p); !f.Exact {
+					t.Fatalf("pending %d: %+v, want Exact=true", i, f)
+				}
+			}
+			if f := final(t, run(t, p, text)); !f.Exact { // as vagas voltaram
+				t.Fatalf("after the counts ended: %+v, want Exact=true", f)
+			}
+		})
+	}
+}

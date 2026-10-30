@@ -22,12 +22,15 @@ type Relay struct {
 	// Nil mantém o passthrough byte a byte.
 	Reducer Reducer
 	// OnReport, se não for nil, recebe o Report final de cada tools/call depois que a
-	// resposta foi enviada e a contagem exata terminou. Não atrasa o envio ao agente, mas
-	// segura uma vaga de MaxInFlight até retornar.
+	// resposta foi enviada e a contagem exata terminou. Não atrasa o envio ao agente nem
+	// segura a vaga da resposta; com MaxInFlight Reports pendentes, o próximo sai na hora
+	// com Exact=false.
 	OnReport func(pipeline.Report)
-	// MaxInFlight limita quantas respostas de tools/call são reduzidas e entregues ao
-	// mesmo tempo (ADR-001 §3). Zero ou negativo usa 16.
+	// MaxInFlight limita quantas respostas de tools/call são reduzidas ao mesmo tempo e
+	// quantos Reports esperam a contagem exata (ADR-001 §3). Zero ou negativo usa 16.
 	MaxInFlight int
+
+	deliveries chan struct{} // vagas dos Reports pendentes; criado em Serve
 }
 
 const defaultMaxInFlight = 16
@@ -48,6 +51,7 @@ func (r Relay) Serve(ctx context.Context, agentIn io.Reader, agentOut io.Writer)
 		return errors.New("mcp relay: upstream streams are required")
 	}
 
+	r.deliveries = make(chan struct{}, r.maxInFlight())
 	var agentOutMu sync.Mutex
 	var calls toolCalls
 	write := func(line []byte) error {
@@ -89,7 +93,7 @@ func (r Relay) Serve(ctx context.Context, agentIn io.Reader, agentOut io.Writer)
 				}
 				inFlight.Done()
 				if after != nil {
-					after() // a vaga só volta depois da entrega do Report
+					after() // só passa de max_in_flight Reports pendentes; a vaga não espera a contagem
 				}
 			}()
 			return nil

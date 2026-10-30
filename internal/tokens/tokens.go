@@ -150,19 +150,38 @@ func measure(ctx context.Context, c Counter, texts []string, keep []bool, nonTex
 // UnchangedAsync retorna na hora e conta em outra goroutine, para o relay enviar a
 // resposta ao agente antes e anexar a medição ao Record depois.
 func UnchangedAsync(ctx context.Context, c Counter, texts []string, nonTextBytes int) <-chan Measurement {
-	return MeasureAsync(ctx, c, texts, nil, nonTextBytes)
+	return MeasureAsync(ctx, nil, c, texts, nil, nonTextBytes)
 }
+
+// Limiter limita quantas contagens em segundo plano rodam ao mesmo tempo.
+type Limiter chan struct{}
+
+// NewLimiter devolve um Limiter com n vagas.
+func NewLimiter(n int) Limiter { return make(Limiter, n) }
 
 // MeasureAsync é a versão em segundo plano de measure. Depois do envio o agente pode
 // cancelar a requisição, então a contagem ignora o cancelamento de ctx (WithoutCancel)
-// e tem o próprio prazo de 5s.
-func MeasureAsync(ctx context.Context, c Counter, texts []string, keep []bool, nonTextBytes int) <-chan Measurement {
+// e tem o próprio prazo de 5s. lim (nil = sem limite) nunca bloqueia: sem vaga livre a
+// contagem não roda e a medição sai na hora com Exact=false e tokens zerados.
+func MeasureAsync(ctx context.Context, lim Limiter, c Counter, texts []string, keep []bool, nonTextBytes int) <-chan Measurement {
 	ch := make(chan Measurement, 1)
+	if lim != nil {
+		select {
+		case lim <- struct{}{}:
+		default:
+			ch <- Measurement{Encoding: c.Encoding(), NonTextBytes: nonTextBytes}
+			return ch
+		}
+	}
 	ctx = context.WithoutCancel(ctx)
 	go func() {
 		ctx, cancel := context.WithTimeout(ctx, asyncTimeout)
 		defer cancel()
-		ch <- measure(ctx, c, texts, keep, nonTextBytes)
+		m := measure(ctx, c, texts, keep, nonTextBytes)
+		if lim != nil {
+			<-lim // a vaga volta antes de entregar a medição
+		}
+		ch <- m
 	}()
 	return ch
 }

@@ -61,8 +61,8 @@ func (t *toolCalls) idle() bool {
 
 // reduce é o ponto único em que o pipeline entra no relay. Só a resposta de um
 // tools/call passa por aqui; qualquer falha devolve a linha original (fail-open).
-// after, se não for nil, roda depois que a linha foi enviada ao agente e bloqueia até o
-// Report final ser entregue; quem chama decide se isso segura uma vaga (ver Relay.Serve).
+// after, se não for nil, roda depois que a linha foi enviada ao agente e entrega o Report
+// (ver deliver); não espera a contagem exata.
 func (r Relay) reduce(ctx context.Context, calls *toolCalls, line []byte) (out []byte, after func()) {
 	out = line
 	defer func() {
@@ -93,13 +93,31 @@ func (r Relay) reduce(ctx context.Context, calls *toolCalls, line []byte) (out [
 	return out, after
 }
 
-// deliver entrega o Report final (com a contagem exata) ao observador.
+// deliver entrega o Report ao observador sem esperar a contagem exata: o que espera é uma
+// goroutine, e só max_in_flight delas existem ao mesmo tempo. Sem vaga, o Report sai na
+// hora e, se a contagem ainda não terminou, com Exact=false (fora do M1).
 func (r Relay) deliver(o pipeline.Outcome) {
-	report := o.Report
-	if o.Done != nil {
-		report = <-o.Done
+	select {
+	case r.deliveries <- struct{}{}:
+		go func() {
+			defer func() { <-r.deliveries }()
+			report := o.Report
+			if o.Done != nil {
+				report = <-o.Done
+			}
+			r.OnReport(report)
+		}()
+	default:
+		report := o.Report
+		report.Exact = false
+		if o.Done != nil {
+			select {
+			case report = <-o.Done:
+			default:
+			}
+		}
+		r.OnReport(report)
 	}
-	r.OnReport(report)
 }
 
 // resultView é a visão mínima de um result de tools/call que o relay sabe editar:

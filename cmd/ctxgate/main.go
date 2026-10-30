@@ -59,15 +59,24 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return err
 	}
 
-	var opts []mcp.Option
-	if cfg.Pipeline.Enabled {
-		reducer, err := newPipeline(cfg.Pipeline, stderr)
-		if err != nil {
-			return fmt.Errorf("serve: %w", err)
-		}
-		opts = append(opts, mcp.WithReducer(reducer), mcp.WithMaxInFlight(cfg.Pipeline.MaxInFlight))
+	opts, err := pipelineOptions(cfg.Pipeline, stderr)
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
 	}
 	return mcp.Run(ctx, stdin, stdout, stderr, upstream.Command, upstream.Args, upstream.Env, time.Duration(upstream.StartupTimeout), opts...)
+}
+
+// pipelineOptions liga o pipeline ao relay: o reducer e o limite pipeline.max_in_flight.
+// Com pipeline.enabled: false não há opções e o relay fica em passthrough.
+func pipelineOptions(cfg config.Pipeline, stderr io.Writer) ([]mcp.Option, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+	reducer, err := newPipeline(cfg, stderr)
+	if err != nil {
+		return nil, err
+	}
+	return []mcp.Option{mcp.WithReducer(reducer), mcp.WithMaxInFlight(cfg.MaxInFlight)}, nil
 }
 
 // newPipeline monta o pipeline do relay a partir da config. Por enquanto só o dedup exato
@@ -82,10 +91,11 @@ func newPipeline(cfg config.Pipeline, stderr io.Writer) (*pipeline.Pipeline, err
 		stages = append(stages, pipeline.ExactDedup{})
 	}
 	return pipeline.New(pipeline.Options{
-		Counter: counter,
-		Stages:  stages,
-		Timeout: time.Duration(cfg.Timeout),
-		Logger:  slog.New(slog.NewTextHandler(stderr, nil)),
+		Counter:     counter,
+		Stages:      stages,
+		Timeout:     time.Duration(cfg.Timeout),
+		MaxInFlight: cfg.MaxInFlight,
+		Logger:      slog.New(slog.NewTextHandler(stderr, nil)),
 	}), nil
 }
 

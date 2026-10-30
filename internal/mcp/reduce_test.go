@@ -599,33 +599,69 @@ func TestMaxInFlightIsConfigurable(t *testing.T) {
 	}
 }
 
-// A vaga só volta depois que o Report final foi entregue: o deliver fica sob o limite.
-func TestDeliverHoldsItsSlotUntilTheReportIsDelivered(t *testing.T) {
-	countDone := make(chan pipeline.Report, 1)
-	entered := make(chan struct{}, 2)
-	red := &fakeReducer{outcome: func(in pipeline.Input) pipeline.Outcome {
-		entered <- struct{}{}
-		return pipeline.Outcome{Texts: in.Texts, Report: pipeline.Report{Mode: pipeline.ModePassthrough}, Done: countDone}
+// pendingCount devolve um reducer cujo Report final (a contagem exata) nunca termina
+// até alguém mandar em done. O Report do caminho crítico diz Exact=true de propósito,
+// para provar que quem sai com Exact=false é a regra do limite, não o reducer.
+func pendingCount(done chan pipeline.Report) *fakeReducer {
+	return &fakeReducer{outcome: func(in pipeline.Input) pipeline.Outcome {
+		report := pipeline.Report{Mode: pipeline.ModePassthrough}
+		report.Exact = true
+		return pipeline.Outcome{Texts: in.Texts, Report: report, Done: done}
 	}}
-	h := newHarness(t, Relay{Reducer: red, MaxInFlight: 1, OnReport: func(pipeline.Report) {}})
-	h.sendCalls(1, 2)
-	h.respond(1, "x")
-	h.respond(2, "x")
-	<-entered
-	h.receivedID() // a resposta 1 já chegou ao agente; a contagem exata ainda não terminou
+}
+
+// A vaga volta assim que a resposta foi escrita ao agente: uma contagem lenta não a segura.
+func TestSlowCountDoesNotHoldTheInFlightSlot(t *testing.T) {
+	const limit = 16
+	done := make(chan pipeline.Report, limit+4)
+	h := newHarness(t, Relay{Reducer: pendingCount(done), OnReport: func(pipeline.Report) {}})
+	ids := make([]int, limit+4) // mais que o limite, com todas as contagens ainda pendentes
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	h.sendCalls(ids...)
+	for _, id := range ids {
+		h.respond(id, "x")
+	}
+	for range ids {
+		h.receivedID() // a 17ª em diante chega sem esperar nenhuma contagem
+	}
+	for range ids {
+		done <- pipeline.Report{}
+	}
+}
+
+// Os Reports pendentes também têm o limite de max_in_flight. Passou dele, o Report sai
+// na hora, sem esperar a contagem, com Exact=false; os demais saem com o valor final.
+func TestReportsBeyondTheLimitAreNotExact(t *testing.T) {
+	done := make(chan pipeline.Report, 2)
+	reports := make(chan pipeline.Report, 4)
+	h := newHarness(t, Relay{Reducer: pendingCount(done), MaxInFlight: 2, OnReport: func(r pipeline.Report) { reports <- r }})
+	h.sendCalls(1, 2, 3, 4)
+	for id := 1; id <= 4; id++ {
+		h.respond(id, "x")
+	}
+	for range 4 {
+		h.receivedID()
+	}
+	for range 2 { // as duas fora do limite
+		if r := finalReport(t, reports); r.Exact {
+			t.Fatalf("report beyond the limit = %+v, want Exact=false", r)
+		}
+	}
 	select {
-	case <-entered:
-		t.Fatal("the second call started while the first report was still pending")
+	case r := <-reports:
+		t.Fatalf("report %+v delivered before its count ended", r)
 	case <-time.After(100 * time.Millisecond):
 	}
-	countDone <- pipeline.Report{}
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the second call never started after the first report was delivered")
+	for range 2 {
+		done <- pipeline.Report{Mode: pipeline.ModeApplied, Measurement: tokens.Measurement{Exact: true}}
 	}
-	h.receivedID()
-	countDone <- pipeline.Report{}
+	for range 2 {
+		if r := finalReport(t, reports); !r.Exact || r.Mode != pipeline.ModeApplied {
+			t.Fatalf("final report = %+v, want the counted one", r)
+		}
+	}
 }
 
 func TestLargeResponseDoesNotDelayTheSmallOnesBehindIt(t *testing.T) {
