@@ -11,7 +11,10 @@ import (
 	"time"
 )
 
-const shutdownGrace = 2 * time.Second
+const (
+	shutdownGrace         = 2 * time.Second // fixed on purpose: no YAML field (decisoes-cto, 2026-10-29)
+	defaultStartupTimeout = 30 * time.Second
+)
 
 // Run starts one stdio upstream and relays the agent session to it.
 func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.Writer, command string, args []string, env map[string]string, startupTimeout time.Duration) error {
@@ -35,32 +38,26 @@ func Run(ctx context.Context, agentIn io.Reader, agentOut io.Writer, stderr io.W
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
 
-	relayCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	relayCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	started := make(chan struct{})
 	responded := make(chan struct{})
-	timedOut := make(chan struct{})
-	go watchStartup(relayCtx, cancel, started, responded, timedOut, startupTimeout)
+	if startupTimeout <= 0 {
+		startupTimeout = defaultStartupTimeout
+	}
+	go watchStartup(relayCtx, cancel, started, responded, fmt.Errorf("upstream %q did not respond within startup_timeout %s", command, startupTimeout), startupTimeout)
 
 	relay := Relay{UpstreamIn: upstreamIn, UpstreamOut: upstreamOut}
-	serveErr := relay.Serve(relayCtx, &firstReadReader{Reader: cancelOnEOFReader{Reader: agentIn, cancel: cancel}, signal: started}, &firstWriteWriter{Writer: agentOut, signal: responded})
+	serveErr := relay.Serve(relayCtx, &firstReadReader{Reader: cancelOnEOFReader{Reader: agentIn, cancel: func() { cancel(nil) }}, signal: started}, &firstWriteWriter{Writer: agentOut, signal: responded})
 	shutdown(cmd.Process.Pid, upstreamIn, waited)
-	select {
-	case <-timedOut:
-		return fmt.Errorf("upstream %q did not respond within startup_timeout %s", command, startupTimeout)
-	default:
-	}
 	return serveErr
 }
 
-func watchStartup(ctx context.Context, cancel context.CancelFunc, started, responded <-chan struct{}, timedOut chan<- struct{}, timeout time.Duration) {
+func watchStartup(ctx context.Context, cancel context.CancelCauseFunc, started, responded <-chan struct{}, timeoutErr error, timeout time.Duration) {
 	select {
 	case <-ctx.Done():
 		return
 	case <-started:
-	}
-	if timeout <= 0 {
-		timeout = 30 * time.Second
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -68,8 +65,7 @@ func watchStartup(ctx context.Context, cancel context.CancelFunc, started, respo
 	case <-ctx.Done():
 	case <-responded:
 	case <-timer.C:
-		close(timedOut)
-		cancel()
+		cancel(timeoutErr)
 	}
 }
 
@@ -122,19 +118,21 @@ func mergeEnv(overrides map[string]string) []string {
 	return env
 }
 
-func shutdown(pid int, stdin io.Closer, waited <-chan error) {
+// shutdown ends the upstream's whole process group: stdin closes, SIGTERM goes
+// to the group, and whatever is still alive after shutdownGrace gets SIGKILL.
+func shutdown(pgid int, stdin io.Closer, waited <-chan error) {
 	_ = stdin.Close()
-	select {
-	case <-waited:
-		return
-	default:
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	deadline := time.Now().Add(shutdownGrace)
+	for groupAlive(pgid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
 	}
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	select {
-	case <-waited:
-		return
-	case <-time.After(shutdownGrace):
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-		<-waited
+	if groupAlive(pgid) {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	}
+	<-waited
+}
+
+func groupAlive(pgid int) bool {
+	return syscall.Kill(-pgid, 0) == nil
 }

@@ -151,7 +151,8 @@ func TestRelayPassesNonToolMCPMessagesUnchanged(t *testing.T) {
 		"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":3}}\n" +
 		"{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"resources\":[]}}\n" +
 		"{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"prompts\":[]}}\n" +
-		"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"x-unknown/server\",\"weird\":[1,2]}\n"
+		"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"x-unknown/server\",\"weird\":[1,2]}\n" +
+		"{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{}}\n"
 	go func() {
 		_, _ = io.WriteString(upstreamOutW, responses)
 		_ = upstreamOutW.Close()
@@ -223,5 +224,66 @@ func TestRelayReturnsAfterAgentEOF(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Serve() did not return after agent EOF")
+	}
+}
+
+func TestRelayAnswersPendingRequestsWhenUpstreamCloses(t *testing.T) {
+	agentInR, agentInW := io.Pipe()
+	upstreamInR, upstreamInW := io.Pipe()
+	upstreamOutR, upstreamOutW := io.Pipe()
+	var agentOut lockedBuffer
+	relay := Relay{UpstreamIn: upstreamInW, UpstreamOut: upstreamOutR}
+	done := make(chan error, 1)
+	go func() { done <- relay.Serve(context.Background(), agentInR, &agentOut) }()
+
+	requests := "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}\n" +
+		"{\"jsonrpc\":\"2.0\",\"id\":\"b\",\"method\":\"tools/call\"}\n" +
+		"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"
+	go func() { _, _ = io.WriteString(agentInW, requests) }()
+	if _, err := io.ReadFull(upstreamInR, make([]byte, len(requests))); err != nil {
+		t.Fatal(err)
+	}
+	answered := "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n"
+	go func() {
+		_, _ = io.WriteString(upstreamOutW, answered)
+		_ = upstreamOutW.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Serve() = nil after the upstream closed with a pending request")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve() did not return after the upstream closed")
+	}
+	want := answered + "{\"jsonrpc\":\"2.0\",\"id\":\"b\",\"error\":{\"code\":-32603,\"message\":\"upstream exited before responding\"}}\n"
+	if got := agentOut.String(); got != want {
+		t.Fatalf("agent output = %q, want %q", got, want)
+	}
+}
+
+func TestRelayAnswersRequestThatCannotReachTheUpstream(t *testing.T) {
+	agentInR, agentInW := io.Pipe()
+	upstreamInR, upstreamInW := io.Pipe()
+	upstreamOutR, _ := io.Pipe()
+	_ = upstreamInR.Close() // upstream is gone: writes fail with io.ErrClosedPipe
+	var agentOut lockedBuffer
+	relay := Relay{UpstreamIn: upstreamInW, UpstreamOut: upstreamOutR}
+	done := make(chan error, 1)
+	go func() { done <- relay.Serve(context.Background(), agentInR, &agentOut) }()
+
+	go func() { _, _ = io.WriteString(agentInW, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\"}\n") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Serve() = nil after a failed write to the upstream")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve() did not return after a failed write")
+	}
+	want := "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32603,\"message\":\"upstream exited before responding\"}}\n"
+	if got := agentOut.String(); got != want {
+		t.Fatalf("agent output = %q, want %q", got, want)
 	}
 }

@@ -8,8 +8,12 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -25,6 +29,7 @@ type Tool struct {
 	RPCError   string        `json:"rpcError,omitempty"`   // reply is a JSON-RPC error with this message
 	LargeBytes int           `json:"largeBytes,omitempty"` // reply text is this many bytes
 	Echo       bool          `json:"echo,omitempty"`       // reply text is arguments.text after arguments.sleep_ms
+	Crash      bool          `json:"crash,omitempty"`      // after Delay the whole fake process exits with status 3
 }
 
 // Prompt is a fake prompt answered by prompts/get with a single user message.
@@ -37,6 +42,12 @@ type Prompt struct {
 type Config struct {
 	Tools   []Tool   `json:"tools"`
 	Prompts []Prompt `json:"prompts,omitempty"`
+
+	// Process behavior, used only by RunFromEnv.
+	PIDFile    string `json:"pidFile,omitempty"`    // receives the fake's pid; PIDFile+".child" the grandchild's once it is ready
+	IgnoreTERM bool   `json:"ignoreTerm,omitempty"` // SIGTERM is ignored, so only SIGKILL stops it
+	Linger     bool   `json:"linger,omitempty"`     // keep running after stdin closes
+	ChildMark  string `json:"childMark,omitempty"`  // if set, start a grandchild whose command line carries this mark
 }
 
 // Env returns the environment that makes a re-executed test binary load c.
@@ -55,6 +66,48 @@ func FromEnv() (c Config, ok bool, err error) {
 		return c, false, nil
 	}
 	return c, true, json.Unmarshal([]byte(raw), &c)
+}
+
+const roleKey = "CTXGATE_FAKE_ROLE"
+
+// RunFromEnv turns the current process into the fake upstream described by
+// Config.Env(): the cmd/fakeupstream binary and the re-executed test binary
+// both call it. ran is false when no Config is set.
+func RunFromEnv(stdin io.Reader, stdout io.Writer) (ran bool, err error) {
+	c, ok, err := FromEnv()
+	if !ok || err != nil {
+		return false, err
+	}
+	if c.IgnoreTERM {
+		signal.Ignore(syscall.SIGTERM)
+	}
+	if os.Getenv(roleKey) == "child" {
+		if c.PIDFile != "" { // tells the test that SIGTERM handling is now in place
+			if err := os.WriteFile(c.PIDFile+".child", []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+				return true, err
+			}
+		}
+		select {} // the grandchild only exists to be reaped or killed
+	}
+	if c.PIDFile != "" {
+		if err := os.WriteFile(c.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			return true, err
+		}
+	}
+	if c.ChildMark != "" {
+		child := exec.Command(os.Args[0], append(os.Args[1:], c.ChildMark)...)
+		child.Env = append(os.Environ(), roleKey+"=child")
+		if err := child.Start(); err != nil {
+			return true, err
+		}
+	}
+	if err := c.Serve(stdin, stdout); err != nil {
+		return true, err
+	}
+	if c.Linger {
+		select {}
+	}
+	return true, nil
 }
 
 type request struct {
@@ -158,6 +211,9 @@ func (c Config) call(req request) response {
 			continue
 		}
 		time.Sleep(t.Delay)
+		if t.Crash {
+			os.Exit(3)
+		}
 		if t.RPCError != "" {
 			resp.Error = &rpcError{Code: -32000, Message: t.RPCError}
 			return resp
