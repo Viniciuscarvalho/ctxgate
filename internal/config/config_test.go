@@ -62,7 +62,8 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "invalid YAML", yaml: "upstreams: [\n", contains: "config:"},
 		{name: "no upstream", yaml: "version: 1\n", contains: "config.upstreams: exactly one upstream is required, got 0"},
 		{name: "unknown field", yaml: "upstreams:\n  - name: filesystem\n    command: npx\n    commmand: typo\n", contains: "commmand"},
-		{name: "invalid startup timeout", yaml: "upstreams:\n  - name: filesystem\n    command: npx\n    startup_timeout: 5\n", contains: "config.upstreams[].startup_timeout:"},
+		{name: "removed shutdown grace", yaml: "upstreams:\n  - name: filesystem\n    command: npx\n    shutdown_grace: 2s\n", contains: "shutdown_grace"},
+		{name: "invalid startup timeout", yaml: "upstreams:\n  - name: filesystem\n    command: npx\n    startup_timeout: shortly\n", contains: "config.upstreams[0].startup_timeout"},
 		{name: "empty file", yaml: "", contains: "config: file is empty"},
 	}
 
