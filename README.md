@@ -48,6 +48,8 @@ O ctxgate é um proxy MCP local. O agente fala com ele por stdio, como falaria c
 2. **Ranking.** Ordena os trechos por relevância com BM25 local, sem LLM e sem rede. A consulta vem da config de cada tool ou, se não houver, dos argumentos da chamada. Sem consulta, nada é cortado.
 3. **Orçamento.** Mantém os trechos mais relevantes até o limite de tokens configurado, contados com `cl100k_base`.
 
+**Tokens aproximados (cl100k_base).** Todas as contagens usam o encoding `cl100k_base` (pacote `internal/tokens`, offline). Claude, Cursor e outros agentes usam outros tokenizers, então o valor absoluto é aproximado; a economia relativa (%) é menos sensível a essa diferença.
+
 O pacote `metrics` não é um estágio: ele só observa. Registra os tokens antes e depois e a latência, e o `store` grava os metadados no SQLite local, sem alterar a resposta.
 
 ## Garantias de projeto
