@@ -198,3 +198,34 @@ type countFunc func(string) (int, error)
 
 func (f countFunc) Count(s string) (int, error) { return f(s) }
 func (countFunc) Encoding() string              { return "fake" }
+
+func TestAsyncCountSurvivesCancelAfterSend(t *testing.T) {
+	c := &fakeCounter{delay: 50 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := UnchangedAsync(ctx, c, []string{"a b", "c d e"}, 0)
+	cancel() // o agente cancelou a requisição depois do envio
+	m := <-ch
+	if !m.Exact || m.TokensBefore != 5 || m.TokensAfter != 5 {
+		t.Fatalf("m = %+v, want Exact=true with 5 tokens", m)
+	}
+}
+
+func TestAsyncCountHasItsOwnTimeout(t *testing.T) {
+	old := asyncTimeout
+	asyncTimeout = 30 * time.Millisecond
+	defer func() { asyncTimeout = old }()
+	c := &fakeCounter{delay: 100 * time.Millisecond}
+	texts := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"} // mais textos que workers
+	m := <-UnchangedAsync(context.Background(), c, texts, 0)
+	if m.Exact {
+		t.Fatalf("m = %+v, want Exact=false after the async timeout", m)
+	}
+}
+
+func TestMeasureAsyncCountsKeptTextsAfter(t *testing.T) {
+	c := &fakeCounter{}
+	m := <-MeasureAsync(context.Background(), c, []string{"a b c", "d e", "f"}, []bool{true, false, true}, 7)
+	if !m.Exact || m.TokensBefore != 6 || m.TokensAfter != 4 || m.NonTextBytes != 7 {
+		t.Fatalf("m = %+v, want before=6 after=4 nonText=7", m)
+	}
+}

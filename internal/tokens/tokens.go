@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/tiktoken-go/tokenizer"
 )
@@ -118,19 +119,30 @@ func countSafely(c Counter, text string) (n int, err error) {
 	return c.Count(text)
 }
 
+// asyncTimeout é o prazo próprio da contagem em segundo plano (decisão do CTO).
+var asyncTimeout = 5 * time.Second
+
 // Unchanged mede uma resposta que sai intacta (passthrough ou atalho do ADR-005 §4):
 // tokens_before == tokens_after, com o valor exato. Se a contagem falhar, devolve
 // Exact=false e tokens zerados.
 func Unchanged(ctx context.Context, c Counter, texts []string, nonTextBytes int) Measurement {
+	return measure(ctx, c, texts, nil, nonTextBytes)
+}
+
+// measure soma os tokens de todos os textos (before) e dos que têm keep[i] (after);
+// keep nil mantém todos.
+func measure(ctx context.Context, c Counter, texts []string, keep []bool, nonTextBytes int) Measurement {
 	m := Measurement{Encoding: c.Encoding(), NonTextBytes: nonTextBytes}
 	counts, err := CountAll(ctx, c, texts)
 	if err != nil {
 		return m
 	}
-	for _, n := range counts {
+	for i, n := range counts {
 		m.TokensBefore += n
+		if keep == nil || keep[i] {
+			m.TokensAfter += n
+		}
 	}
-	m.TokensAfter = m.TokensBefore
 	m.Exact = true
 	return m
 }
@@ -138,7 +150,19 @@ func Unchanged(ctx context.Context, c Counter, texts []string, nonTextBytes int)
 // UnchangedAsync retorna na hora e conta em outra goroutine, para o relay enviar a
 // resposta ao agente antes e anexar a medição ao Record depois.
 func UnchangedAsync(ctx context.Context, c Counter, texts []string, nonTextBytes int) <-chan Measurement {
+	return MeasureAsync(ctx, c, texts, nil, nonTextBytes)
+}
+
+// MeasureAsync é a versão em segundo plano de measure. Depois do envio o agente pode
+// cancelar a requisição, então a contagem ignora o cancelamento de ctx (WithoutCancel)
+// e tem o próprio prazo de 5s.
+func MeasureAsync(ctx context.Context, c Counter, texts []string, keep []bool, nonTextBytes int) <-chan Measurement {
 	ch := make(chan Measurement, 1)
-	go func() { ch <- Unchanged(ctx, c, texts, nonTextBytes) }()
+	ctx = context.WithoutCancel(ctx)
+	go func() {
+		ctx, cancel := context.WithTimeout(ctx, asyncTimeout)
+		defer cancel()
+		ch <- measure(ctx, c, texts, keep, nonTextBytes)
+	}()
 	return ch
 }
