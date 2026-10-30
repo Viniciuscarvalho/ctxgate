@@ -27,9 +27,16 @@ type Tool struct {
 	Echo       bool          `json:"echo,omitempty"`       // reply text is arguments.text after arguments.sleep_ms
 }
 
+// Prompt is a fake prompt answered by prompts/get with a single user message.
+type Prompt struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
+}
+
 // Config is the whole fake upstream.
 type Config struct {
-	Tools []Tool `json:"tools"`
+	Tools   []Tool   `json:"tools"`
+	Prompts []Prompt `json:"prompts,omitempty"`
 }
 
 // Env returns the environment that makes a re-executed test binary load c.
@@ -115,7 +122,7 @@ func (c Config) handle(req request) response {
 		_ = json.Unmarshal(req.Params, &p)
 		resp.Result = map[string]any{
 			"protocolVersion": p.ProtocolVersion,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"capabilities":    map[string]any{"tools": map[string]any{}, "prompts": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "mcpfake", "version": "0"},
 		}
 	case "ping":
@@ -128,6 +135,8 @@ func (c Config) handle(req request) response {
 		resp.Result = map[string]any{"tools": tools}
 	case "tools/call":
 		resp = c.call(req)
+	case "prompts/get":
+		resp = c.prompt(req)
 	default:
 		resp.Error = &rpcError{Code: -32601, Message: "method not found: " + req.Method}
 	}
@@ -168,5 +177,27 @@ func (c Config) call(req request) response {
 		return resp
 	}
 	resp.Error = &rpcError{Code: -32602, Message: "unknown tool: " + p.Name}
+	return resp
+}
+
+func (c Config) prompt(req request) response {
+	resp := response{ID: req.ID}
+	var p struct {
+		Name string `json:"name"`
+	}
+	_ = json.Unmarshal(req.Params, &p)
+	for _, pr := range c.Prompts {
+		if pr.Name == p.Name {
+			resp.Result = map[string]any{
+				"description": "fake prompt " + pr.Name,
+				"messages": []map[string]any{{
+					"role":    "user",
+					"content": map[string]any{"type": "text", "text": pr.Text},
+				}},
+			}
+			return resp
+		}
+	}
+	resp.Error = &rpcError{Code: -32602, Message: "unknown prompt: " + p.Name}
 	return resp
 }

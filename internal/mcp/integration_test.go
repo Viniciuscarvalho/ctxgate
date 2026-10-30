@@ -1,6 +1,7 @@
 package mcp_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -166,6 +167,72 @@ func TestPassthroughConcurrentCallsKeepTheirIDs(t *testing.T) {
 			wg.Wait()
 		})
 	}
+}
+
+// TestPassthroughPromptsGetIsByteIdentical sends a raw prompts/get line (odd
+// spacing and key order on purpose) and compares the raw response line with the
+// one the fake writes when no relay is in between.
+func TestPassthroughPromptsGetIsByteIdentical(t *testing.T) {
+	cfg := mcpfake.Config{Prompts: []mcpfake.Prompt{{Name: "resumo", Text: "texto com acentuação ☕ e \\n escapado"}}}
+	request := `{ "params":{"arguments":{"tema":"café"}, "name":"resumo"},  "method":"prompts/get","id":"p-1","jsonrpc":"2.0" }` + "\n"
+
+	want := exchange(t, request, func(_ context.Context, in io.Reader, out io.Writer) error { return cfg.Serve(in, out) })
+	if !strings.Contains(want, `"text":"texto com acentuação ☕`) {
+		t.Fatalf("baseline response is not the prompt: %q", want)
+	}
+	relays := map[string]func(context.Context, io.Reader, io.Writer) error{
+		"memory": func(ctx context.Context, in io.Reader, out io.Writer) error {
+			upInR, upInW := io.Pipe()
+			upOutR, upOutW := io.Pipe()
+			go func() {
+				_ = cfg.Serve(upInR, upOutW)
+				_ = upOutW.Close()
+			}()
+			return mcp.Relay{UpstreamIn: upInW, UpstreamOut: upOutR}.Serve(ctx, in, out)
+		},
+		"subprocess": func(ctx context.Context, in io.Reader, out io.Writer) error {
+			args := []string{"-test.run=^TestFakeUpstreamProcess$", "--"}
+			return mcp.Run(ctx, in, out, io.Discard, os.Args[0], args, cfg.Env(), 10*time.Second)
+		},
+	}
+	for name, serve := range relays {
+		t.Run(name, func(t *testing.T) {
+			if got := exchange(t, request, serve); got != want {
+				t.Fatalf("prompts/get response changed by the relay\ngot:  %q\nwant: %q", got, want)
+			}
+		})
+	}
+}
+
+// exchange writes one raw request line to serve and returns the raw response line.
+func exchange(t *testing.T, request string, serve func(context.Context, io.Reader, io.Writer) error) string {
+	t.Helper()
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, inR, outW)
+		_ = outW.Close()
+	}()
+	if _, err := io.WriteString(inW, request); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(outR).ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading response: %v", err)
+	}
+	_ = inW.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("serve returned %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("serve did not stop after input closed")
+	}
+	return line
 }
 
 // connectDirect talks to the fake with no relay in between; it is the baseline.
