@@ -84,7 +84,7 @@ Já fixadas no PRD (não reabrir sem o PO):
 | Plataformas | `CGO_ENABLED=0`; linux amd64/arm64, darwin amd64/arm64, windows/amd64 (sem smoke test no Windows) | ADR-003 |
 | Benchmark | Replay determinístico; sucesso = retenção de `required_evidence` (proxy); corpus privado em `bench/corpus/` (no `.gitignore`; no repo só agregados + hash); corpus sintético público em `bench/public/`; camada B (agente ao vivo) opcional e manual | ADR-004 |
 
-Padrões iniciais (validados no S5, ajustáveis só por config): `budget_tokens: 6000`, `dedup.similarity: 0.90`, `bm25 k1=1.2 b=0.75`, `pipeline.timeout: 200ms`, `max_in_flight: 16`, `startup_timeout: 30s`, `shutdown_grace: 2s`.
+Padrões iniciais (validados no S5, ajustáveis só por config): `budget_tokens: 6000`, `dedup.similarity: 0.90`, `bm25 k1=1.2 b=0.75`, `pipeline.timeout: 200ms`, `max_in_flight: 16`, `startup_timeout: 30s`. O encerramento do upstream usa kill após prazo fixo de 2s, não configurável (sem campo no YAML).
 
 **Regras do Product**
 - Chamadas sem consulta (`query_source=none`) não são cortadas; a fração é reportada.
