@@ -4,6 +4,32 @@
 
 > ⚠️ **Status: em desenvolvimento (MVP).** Os comandos abaixo descrevem o comportamento planejado da v0.1.0. Os números de benchmark entram aqui quando a S5 estiver concluída.
 
+## Arquitetura
+
+O ctxgate fica entre o agente de código e o servidor MCP. Ele repassa as mensagens sem mexer nelas e só enxuga as respostas grandes das ferramentas antes que elas voltem ao agente.
+
+```mermaid
+flowchart LR
+    A[Agente de código] -->|pedido| R[mcp: relay]
+    R -->|pedido sem mudança| U[Servidor MCP]
+    U -->|resposta| R
+    R -->|resposta grande| P
+    subgraph P[pipeline: filtro]
+        D[dedup] --> K[ranking] --> O[orçamento]
+    end
+    P -->|resposta enxuta| R
+    R -->|resposta| A
+    P -.->|guarda o que cortou| S[(store: SQLite local)]
+    P -.->|tokens poupados e tempo| M[metrics]
+```
+
+- **mcp** repassa as mensagens nos dois sentidos e não conhece as outras peças.
+- **pipeline** corta, ranqueia e remove repetição (dedup, ranking e orçamento, nessa ordem). Se der erro, devolve a resposta original e o agente nunca quebra.
+- **store** guarda num SQLite local o que foi cortado, para recuperar depois.
+- **metrics** mostra quantos tokens foram poupados e quanto tempo isso custou.
+
+Detalhes e o passo a passo de como adicionar um estágio: [`docs/arquitetura.md`](docs/arquitetura.md).
+
 ## Por que usar
 
 Agentes de código como Claude Code, Codex e Cursor recebem dos servidores MCP de memória e de contexto muito mais texto do que precisam, e boa parte dele se repete. Isso tem três consequências:
@@ -16,22 +42,13 @@ O ctxgate fica entre o agente e esses servidores e resolve as três coisas local
 
 ## Como funciona
 
-```mermaid
-flowchart LR
-  A[Agente de código<br/>Claude Code, Codex, Cursor] -- stdio MCP --> G[ctxgate]
-  G -- stdio MCP --> U[Servidor MCP upstream<br/>memória ou contexto]
-  U -- resposta --> G
-  G -- resposta enxuta --> A
-  G -. metadados .-> S[(SQLite local)]
-  G -. /metrics .-> P[Prometheus, opcional]
-```
-
-O ctxgate é um proxy MCP local. O agente fala com ele por stdio, como falaria com qualquer servidor MCP, e ele repassa cada chamada ao servidor upstream configurado no YAML. Quando a resposta volta, ela passa por um pipeline antes de chegar ao agente:
+O ctxgate é um proxy MCP local. O agente fala com ele por stdio, como falaria com qualquer servidor MCP, e ele repassa cada chamada ao servidor upstream configurado no YAML. Quando a resposta volta, ela passa por um pipeline de 3 estágios antes de chegar ao agente:
 
 1. **Dedup.** Remove os trechos repetidos dentro da mesma resposta: hash exato para cópias idênticas e simhash com Jaccard ≥0,90 para quase cópias.
 2. **Ranking.** Ordena os trechos por relevância com BM25 local, sem LLM e sem rede. A consulta vem da config de cada tool ou, se não houver, dos argumentos da chamada. Sem consulta, nada é cortado.
 3. **Orçamento.** Mantém os trechos mais relevantes até o limite de tokens configurado, contados com `cl100k_base`.
-4. **Métricas.** Registra os tokens antes e depois e a latência, e grava os metadados no SQLite local.
+
+O pacote `metrics` não é um estágio: ele só observa. Registra os tokens antes e depois e a latência, e o `store` grava os metadados no SQLite local, sem alterar a resposta.
 
 ## Garantias de projeto
 
